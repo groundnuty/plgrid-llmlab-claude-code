@@ -51,15 +51,50 @@ server-side, and open PRs are refining `tool_result` ordering (#29083), document
 #32255 *"OpenAI and Anthropic protocols are not working in sglang"* was filed and closed on
 2026-07-23. Verify against your build before committing.
 
-**Validate before you commit GPU time — the system-role handling is not fully fixed.** vLLM
-#46025 (merged 2026-06-18) replaced unconditional hoisting with chat-template detection, but
-**[#48874](https://github.com/vllm-project/vllm/issues/48874) is open** as of 2026-07-16:
-*"Anthropic /v1/messages renders system-role messages inside `messages` positionally into the
-chat template (**breaks Claude Code >=2.1.2xx tool calling**)"*. PR #44737, "Normalize
-non-standard message roles from Claude Code CLI >= 2.1.154", is **still open**, and
-#44576 *"Claude code does not work with vLLM"* remains open with 4 comments. So run a
-realistic multi-turn, multi-tool session on a pinned Claude Code version first; this is the
-most likely thing to bite you, and it is engine-side, not proxy-side.
+### The open defect that gates this recommendation
+
+The endpoint is real and maintained. It is also, on **current** Claude Code, substantially
+broken for agentic work — and the two facts are not in contradiction, so it is worth being
+precise about the mechanism.
+
+vLLM #46025 (merged 2026-06-18) replaced unconditional system-message hoisting with
+chat-template detection. That fixed a cache problem and created a generation problem.
+**[#48874](https://github.com/vllm-project/vllm/issues/48874) is open** as of 2026-07-16 and
+reports, verbatim from the issue body:
+
+> Recent Claude Code CLI versions (observed with 2.1.207; 2.1.150 does not do this) send their
+> agent-registry context as a **`system`-role message inside the `messages` array, after the
+> user turn** […] Anthropic's first-party API accepts this shape (Claude Code works against it).
+
+> **0.24.0 / 0.25.1**: the request is accepted and the system-role message is rendered
+> **positionally** into the chat template, so the model's context *ends* with a system block
+> instead of the user task. […] it emits pseudo-XML imitations of tool calls as plain text
+> […] the streaming tool parser finds nothing, and the client sees a text-only turn with
+> `stop_reason: end_turn`. In an agentic harness this ends the loop: **~90% of long-prompt
+> tasks (SWE-bench-pro via Claude Code) died as 1-turn completions**, while short prompts
+> often survived.
+
+Three things make this directly relevant here:
+
+1. **It reproduces on this model family.** The reporter used `Qwen/Qwen3.6-35B-A3B-FP8` — the
+   MoE sibling of Qwen3.6-27B — with **both** `qwen3_coder` and `qwen3_xml` parsers and
+   `--reasoning-parser qwen3`. Changing the tool parser does not help.
+2. **It fails silently.** No error, no 400. Just a text-only turn that ends the agent loop.
+   vLLM 0.11.0 rejected the request outright, which was less damaging because it was visible.
+3. **Nobody has fixed it.** One comment, a volunteer offering to investigate (2026-07-17).
+   PR #44737 "Normalize non-standard message roles from Claude Code CLI >= 2.1.154" is **still
+   open**; #44576 *"Claude code does not work with vLLM"* is open with 4 comments.
+
+The underlying tension is unresolved upstream: hoisting the message forks the prefix cache and
+forces full re-prefill every turn (SGLang #28906, measured at 99.0% of reminders hoisted in
+bifrost #4592), while rendering it inline can leave the context ending on a system block and
+derail generation (#48874). Neither engine has a position that is right on both axes.
+
+**Practical consequence for recommendation #1:** the no-proxy path requires either pinning
+Claude Code to a version below the behaviour change (~2.1.150, plus `DISABLE_AUTOUPDATER=1`)
+or a vLLM build that hoists rather than renders positionally — and hoisting costs you the
+prefix cache. If neither is acceptable, **this is the specific case where a role-normalizing
+proxy earns its keep**, and it is the strongest argument in this document for using one.
 
 **Why this matters more than tool choice.** Every translating proxy converts
 Anthropic → OpenAI → Anthropic, and each hop is where the documented failures live: dropped
@@ -297,14 +332,52 @@ closed the gap that made Gemma 1–3 unusable for agentic work: the model card s
 | **Qwen3.6-27B** (dense + vision, Apache-2.0) | **good** | 262K native | `--tool-call-parser qwen3_xml --reasoning-parser qwen3` |
 | **gemma-4-31B-it** (30.7B dense, Apache-2.0) | **workable** | 256K nominal | `--tool-call-parser gemma4 --reasoning-parser gemma4 --chat-template …gemma4.jinja` |
 
-**GLM-5.2 is the standout, and Z.ai proves the harness works.** The model card benchmarks it
-*inside Claude Code*: "We evaluate ProgramBench (200 instances) with Claude-Code 2.1.156" and
-"Terminal-Bench 2.1 (Claude Code): We evaluate in Claude Code 2.1.167". Scores: SWE-bench Pro
-62.1, Terminal Bench 2.1 81.0, MCP-Atlas 76.8. Weakest line is Tool-Decathlon 48.2 (vs Opus
-4.8's 59.9). Caveats: tool calling **and** MTP together need vLLM `main`, not 0.23.0 stable;
-hardware floor is 8×H200/H20 for FP8, 8×B200 for the real 1M window; FP8 throughput silently
-degrades without DeepGEMM. Note Z.ai overrode `max_new_tokens` to 128k "via a transparent
-proxy, bypassing the 64k CLI cap".
+**GLM-5.2 is the standout.** Scores: SWE-bench Pro 62.1, Terminal Bench 2.1 81.0, MCP-Atlas
+76.8. Weakest line is Tool-Decathlon 48.2 (vs Opus 4.8's 59.9). Caveats: tool calling **and**
+MTP together need vLLM `main`, not 0.23.0 stable; hardware floor is 8×H200/H20 for FP8, 8×B200
+for the real 1M window; FP8 throughput silently degrades without DeepGEMM.
+
+#### How Z.ai actually ran Claude Code — and what they leave out
+
+Two of Z.ai's headline numbers were produced *inside Claude Code*. The full methodology
+footnotes, verbatim from the [model card](https://huggingface.co/zai-org/GLM-5.2-FP8/raw/main/README.md)
+(fetched 2026-07-30):
+
+> **ProgramBench**: We evaluate ProgramBench (200 instances) with Claude-Code 2.1.156 using
+> `temperature=1.0, top_p=1.0, max_tokens=64000, max_turns=2000, sample_timeout=6h,
+> reasoning_effort=max`, with a 400K context window. Each instance runs in a (4 CPUs, 8 GB RAM)
+> sandbox with internet access disabled.
+
+> **Terminal-Bench 2.1 (Claude Code)**: We evaluate in Claude Code 2.1.167 with
+> `temperature=1.0, top_p=0.95, max_new_tokens=131072`. We override max_new_tokens to 128k
+> **via a transparent proxy, bypassing the 64k CLI cap** to restore the configurability of
+> `CLAUDE_CODE_MAX_OUTPUT_TOKENS`. We remove wall-clock time limits, while preserving per-task
+> CPU and memory constraints. Scores are averaged over 5 runs.
+
+Useful, copyable parameters: `temperature=1.0` (matches the vLLM recipe), `max_turns=2000`,
+6-hour per-sample timeout, 400K context rather than the full 1M, and `reasoning_effort=max`
+(the chat template's default anyway).
+
+What this does **not** establish, and should not be cited as if it did:
+
+- **They used a proxy, not the raw path.** The vendor itself inserted "a transparent proxy" —
+  to lift the CLI's 64k output cap, not to translate protocol, but it is still an intermediary.
+  That proxy is **not published**: `zai-org/GLM-5` contains only `example/`, `resources/`, and
+  `skills/`; the two `claude` hits in the repo are benchmark prose. There is no harness, no
+  settings file, no proxy source to inspect or reproduce.
+- **The serving stack is unstated.** The footnotes never say whether Claude Code pointed at
+  self-hosted vLLM/SGLang or at Z.ai's own hosted `https://api.z.ai/api/anthropic`. For a team
+  reproducing this on their own GPUs, that is the single most load-bearing omission.
+- **Both runs predate the current breakage.** Claude Code 2.1.156 and 2.1.167 both sit below
+  the 2.1.207 where #48874 was observed. They are above 2.1.154, where strict endpoints began
+  rejecting mid-conversation system roles (cc-switch #3277), so these runs were plausibly
+  already receiving them — and still scored well, which hints that GLM's chat template
+  tolerates inline system blocks better than Qwen3.6's. That is an inference from two verified
+  facts, not a measured result. **These numbers do not validate current Claude Code.**
+
+The honest reading: Z.ai's results show the model is strong in this harness under conditions
+they controlled and did not fully disclose. They are not evidence that a stock
+Claude-Code-to-vLLM setup works today.
 
 **Qwen3.6-27B has a parser-name trap.** The model card prescribes `--tool-call-parser
 qwen3_coder`; current vLLM docs and the vLLM recipe for this model both use **`qwen3_xml`**.
