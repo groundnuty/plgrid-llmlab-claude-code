@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Launch Claude Code against PLGrid LLMLab.
+#   claude-plgrid glm  [args...]   GLM-5.2-FP8 primary   (393k window)
+#   claude-plgrid qwen [args...]   Qwen3.6-27B primary   (262k window)
+# Any extra arguments are passed through to `claude`.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Profile comes from the invoked name (claude-glm / claude-qwen) or the first argument.
+case "$(basename "$0")" in
+  claude-glm)  PROFILE=glm ;;
+  claude-qwen) PROFILE=qwen ;;
+  *)           PROFILE="${1:-glm}"; shift || true ;;
+esac
+
+case "$PROFILE" in
+  glm)  SETTINGS="$REPO/config/claude-settings.glm.json" ;;
+  qwen) SETTINGS="$REPO/config/claude-settings.qwen.json" ;;
+  -h|--help|help)
+        sed -n '2,5p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  *)    echo "unknown profile '$PROFILE' (expected: glm | qwen)" >&2; exit 2 ;;
+esac
+
+PORT="$(sed -n 's/^port: *//p' "$REPO/config/cli-proxy-api.yaml" | head -1)"
+PORT="${PORT:-8317}"
+BASE="http://127.0.0.1:${PORT}"
+
+# Fail early and clearly rather than mid-session.
+if ! curl -fsS -m 5 -o /dev/null -H "Authorization: Bearer local-test-key" "$BASE/v1/models" 2>/dev/null; then
+  echo "error: proxy not reachable at $BASE" >&2
+  echo "       start it with:  make -C '$REPO' proxy" >&2
+  exit 1
+fi
+
+# The alias in settings must exist in the proxy, or every request 502s.
+WANT="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['env']['ANTHROPIC_MODEL'])" "$SETTINGS")"
+if ! curl -fsS -m 5 -H "Authorization: Bearer local-test-key" "$BASE/v1/models" \
+     | python3 -c "import json,sys;ids=[m['id'] for m in json.load(sys.stdin)['data']];sys.exit(0 if sys.argv[1] in ids else 1)" "$WANT"; then
+  echo "error: model '$WANT' is not registered in the proxy" >&2
+  echo "       registered:" >&2
+  curl -fsS -m 5 -H "Authorization: Bearer local-test-key" "$BASE/v1/models" \
+    | python3 -c "import json,sys;[print('         ',m['id']) for m in json.load(sys.stdin)['data']]" >&2
+  exit 1
+fi
+
+# Install project config on first use; never clobber an existing one.
+mkdir -p .claude
+[ -f .claude/statusline.sh ] || { cp "$REPO/config/statusline.sh" .claude/statusline.sh; chmod +x .claude/statusline.sh; }
+
+if [ ! -f .claude/settings.json ]; then
+  cp "$SETTINGS" .claude/settings.json
+  echo "installed .claude/settings.json ($PROFILE)"
+else
+  # Existing settings win, so report what will ACTUALLY run rather than the
+  # profile that was asked for — a silent mismatch here is very confusing.
+  HAVE="$(python3 -c "import json;print(json.load(open('.claude/settings.json'))['env'].get('ANTHROPIC_MODEL',''))" 2>/dev/null || true)"
+  if [ -n "$HAVE" ] && [ "$HAVE" != "$WANT" ]; then
+    echo "note: .claude/settings.json already configures '$HAVE', not '$WANT'." >&2
+    echo "      keeping it. to switch: rm .claude/settings.json && rerun, or edit it." >&2
+    WANT="$HAVE"
+  fi
+fi
+
+echo "Claude Code -> PLGrid LLMLab · model=$WANT · proxy=$BASE"
+exec claude --permission-mode acceptEdits "$@"

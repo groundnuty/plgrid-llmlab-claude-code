@@ -1,13 +1,11 @@
-# Claude Code on PLGrid Forge
+# Setup reference
 
-Run the Claude Code CLI against PLGrid Forge (ACK Cyfronet) models. Verified end-to-end on
-2026-07-30 with Claude Code **2.1.220** and CLIProxyAPI **7.2.110** plus two local fixes.
+Every configuration decision for running Claude Code against PLGrid LLMLab, and the evidence behind
+it. **For installation and day-to-day use see the [repository README](../README.md)** — this document
+explains *why*, not *how to start*.
 
-Files here: `cli-proxy-api.config.yaml` (proxy), `claude-settings.json` (project settings,
-GLM-5.2 primary), `claude-settings-qwen-primary.json` (same with Qwen3.6-27B primary),
-`statusline.sh` (context display). Investigation history and evidence:
-`../claude-code-plgrid-working-config.md`. Gateway performance notes for the operators:
-`../plgrid-forge-observed-performance.md`.
+Verified 2026-07-30 with Claude Code **2.1.220** and CLIProxyAPI **7.2.110** plus two local fixes.
+Config templates live in [`../config/`](../config/); launchers in [`../bin/`](../bin/).
 
 ---
 
@@ -25,36 +23,6 @@ Claude Code speaks Anthropic dialect only, so translation is mandatory. Because 
 absent, **LiteLLM and Bifrost fail out of the box** — both default the Anthropic path to the
 upstream's Responses API. CLIProxyAPI targets `/chat/completions` directly, which is why it is the
 right tool here.
-
-## Install
-
-```bash
-# 1. Proxy, built from the fork — main carries both required fixes (needs Go 1.26)
-git clone https://github.com/groundnuty/CLIProxyAPI && cd CLIProxyAPI
-go build -o cli-proxy-api ./cmd/server
-
-# 2. Config, with your grant key from llmlab.plgrid.pl -> Grants -> Generate API Key
-mkdir -p ~/.cli-proxy-api
-cp <this-dir>/cli-proxy-api.config.yaml ~/.cli-proxy-api/config.yaml
-$EDITOR ~/.cli-proxy-api/config.yaml          # replace PLGRID_API_KEY
-chmod 600 ~/.cli-proxy-api/config.yaml        # it holds a secret
-
-# 3. Per-project Claude Code config
-mkdir -p <project>/.claude
-cp <this-dir>/claude-settings.json <project>/.claude/settings.json
-cp <this-dir>/statusline.sh        <project>/.claude/statusline.sh
-chmod +x                           <project>/.claude/statusline.sh
-
-# 4. Run
-./cli-proxy-api --config ~/.cli-proxy-api/config.yaml    # leave running
-cd <project> && claude                                   # accept the trust prompt once
-```
-
-Everything is project-scoped deliberately. **Nothing belongs in `~/.claude/settings.json`** — these
-choices are specific to this gateway and should not follow you into unrelated projects.
-
-The stock 7.2.110 release works for everything **except** automatic context-limit handling and
-reasoning/thinking blocks. Both need the fork; see [Required fixes](#required-fixes).
 
 ## What you get
 
@@ -109,8 +77,8 @@ them, cap `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the smaller model's window.
 | `glm-4.7-flash-202k` | 202,752 | **Avoid.** Returned a confidently wrong answer. |
 
 Both `glm-5.2-fp8-393k` (primary, Qwen/gemma subagents) and `qwen3.6-27b-262k` (primary, GLM/gemma
-subagents) are verified working as the main model — use `claude-settings.json` or
-`claude-settings-qwen-primary.json` respectively. `qwen3-vl-8b-262k` is also in the proxy config for
+subagents) are verified working as the main model — use `../config/claude-settings.glm.json` or
+`../config/claude-settings.qwen.json` respectively, via `../bin/claude-glm` or `../bin/claude-qwen`. `qwen3-vl-8b-262k` is also in the proxy config for
 image work, since GLM-5.2 is not multimodal.
 
 Note the Qwen-primary variant sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS: "262144"`, not 393216, even
@@ -279,7 +247,7 @@ All on the patched build with the canonical config.
 | `availableModels` with non-`claude` ids | Picker reduced to Default plus allowed models |
 | Images | `Qwen3-VL-8B` and `gemma-4-31B` correct; GLM-5.2 is not multimodal |
 
-**MCP needs nonessential traffic enabled.** The settings file sets
+**MCP needs nonessential traffic enabled.** The settings files set
 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"`; drop it if you use MCP, and do not pass
 `--strict-mcp-config`.
 
