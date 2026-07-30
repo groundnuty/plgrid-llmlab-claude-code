@@ -378,15 +378,26 @@ Verified end-to-end in this mode: GLM-5.2 read the file, patched `median()` corr
 the suite, and reported *"Fixed. For even-length input the median now averages the two middle
 elements (stats.py:1), and python3 run_tests.py exits 0 with PASS."* at 21.6k tok/s.
 
-### Open defect: `count_tokens` returns 503
+### `count_tokens`: retracted, not a defect
 
-Every `POST /v1/messages/count_tokens` through CLIProxyAPI's `openai-compatibility` path returns
-**503**. The route exists and the Claude→OpenAI translator registers a `TokenCount` hook, but it
-is not wired for this provider type. Claude Code degrades to local estimation, so `/context`
-still renders and nothing visibly breaks — the risk is compaction accuracy, which matters more
-once `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is doing real work.
+An earlier revision of this document reported that `POST /v1/messages/count_tokens` always
+returns 503 on the `openai-compatibility` path. **That was wrong.** On retest it returns 200:
+10/10 sequential and 30/30 concurrent. `CountTokens` *is* implemented for that executor
+(`internal/runtime/executor/openai_compat_executor.go`), tokenising locally via
+`helps.TokenizerForModel`.
 
-**On whether to switch tools rather than fix this** — the alternatives are worse on balance:
+74 of 158 historical `count_tokens` requests did return 503 during one window on 2026-07-30.
+Three hypotheses were tested and all disproved: not unimplemented (the code exists and works),
+not load (30 concurrent all succeeded), and not an unconfigured model alias (that returns **502**
+`unknown provider for model …`, not 503). The cause is unexplained and was not reproducible.
+The nearest candidate in the source is the `home.Current()`/`HeartbeatOK()` gate in
+`internal/api/server_middleware.go`, which aborts with 503 in ~1ms — matching the observed
+timings — but that was not confirmed.
+
+Recorded as an unexplained observation rather than a defect. **No patch is proposed for it**, and
+it should not be cited as a reason to prefer another proxy.
+
+**On whether to switch tools** — the alternatives are still worse on balance, for other reasons:
 
 | Tool | `count_tokens` on an OpenAI-compatible upstream | Verdict |
 |---|---|---|
@@ -565,12 +576,20 @@ sufficient for PLGrid, for two concrete reasons:
    `(\d+) tokens > (\d+)`, which PLGrid's wording does not contain — so even when the branch does
    fire, the capture groups fail and no compaction is triggered.
 
-The contribution is to extend that normaliser to recognise vLLM/PLGrid-style phrasing
-(`max_model_len`, `max_total_tokens`, `maximum context length`), extract the two numbers, and emit
-the canonical `prompt is too long: <used> tokens > <limit>`. Combined with wiring up
-`count_tokens` for `openai-compatibility` providers, that is two small, well-scoped PRs against
-the healthiest project in this space — and between them they remove the last two pieces of manual
-tuning from this setup.
+The contribution is to extend that normaliser to recognise vLLM/PLGrid-style phrasing, extract
+the two numbers, and emit the canonical `prompt is too long: <used> tokens > <limit>`. This is the
+**only** patch worth making — the `count_tokens` issue was retracted above.
+
+The real upstream message, captured by overflowing Bielik's 32,768-token window:
+
+```json
+{"detail":"This model's maximum context length is 32768 tokens. However, your request has
+           66511 input tokens. Please reduce the length of the input messages.
+           (parameter=input_tokens, value=66511)","status_code":400}
+```
+
+Note this differs from the `max_tokens` overflow message quoted earlier — a normaliser must
+handle both shapes. Both carry the two numbers the regex needs.
 
 **This is also the only mechanism that gives per-model flexibility.** Because the limit arrives
 in the upstream error on the request that exceeded it, the number is always the active model's
