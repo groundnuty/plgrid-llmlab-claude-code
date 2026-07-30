@@ -494,11 +494,27 @@ for any model; GLM-5.2 is merely less forgiving than a frontier model when it is
   the `N tokens > M` shape the client needs, so it does not solve this case — but a PR should
   reference it rather than conflict silently.
 
-### Untested surfaces
+### Previously untested surfaces — now tested
 
-Images, MCP tools behind the proxy, `--resume`, `availableModels` with these non-`claude` ids, and
-manual `/compact` on a model with adequate headroom (it was only exercised on the over-constrained
-32k case, where failure was correct).
+All verified on the patched build (port 8319) with the canonical config.
+
+| Surface | Result |
+|---|---|
+| **MCP tools** | **Works.** A stdio MCP server showed `magic · ✔ connected · 1 tool` in `/mcp`, and GLM-5.2 invoked it, returning `MAGIC_NUMBER_8675309` — a value existing only inside the server, so the call was real. |
+| **Manual `/compact`** | **Works** with headroom and history: 35,348 → 0 tokens, and the session answered normally afterwards. |
+| **`--resume`** | **Works.** Session appeared in the resume picker, transcript reloaded, history retained (39,522 tokens), responsive. |
+| **`availableModels` with non-`claude` ids** | **Works.** With `["glm-5.2-fp8-393k","qwen3.6-27b-262k"]` and `enforceAvailableModels: true`, the picker reduced to Default plus the allowed model — every Anthropic entry gone. |
+| **Images** | **Model-dependent.** `Qwen3-VL-8B-Instruct` and `gemma-4-31B` both correctly answered "Red" for a 64×64 red PNG. `GLM-5.2-FP8` returns `400 … is not a multimodal model`. |
+
+Two caveats on the above. **MCP needs nonessential traffic enabled** — the canonical config sets
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"`, and this test ran without `--strict-mcp-config`;
+if you use MCP, drop that variable and re-verify. **`/compact` reports `Not enough messages to
+compact` on a fresh session**, which is correct behaviour rather than a fault — build a few turns
+first.
+
+On images: since the primary model is not multimodal, pasting an image into a GLM-5.2 session will
+fail. Route image work to a `Qwen3-VL-8B` subagent, and note the earlier finding that an unreadable
+image can make a session unresumable on a non-vision model.
 
 ### Unexplained observations
 
