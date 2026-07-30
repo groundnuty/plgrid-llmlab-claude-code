@@ -181,10 +181,116 @@ cross-references the issue, the only comment is a volunteer offering to investig
 (2026-07-17), and the last commit to `vllm/entrypoints/anthropic/` is 2026-07-18 on an
 unrelated cache-token field.
 
-**Practical consequence for recommendation #1:** the no-proxy path is viable, but only after
-you check the template. Qwen3.6-27B and Kimi K3 work as-is. GLM-5.2-FP8 and gemma-4-31B need
-one of the three fixes above, or a Claude Code pinned below the behaviour change (~2.1.150,
-plus `DISABLE_AUTOUPDATER=1`).
+### Has anyone published a working recipe? No — and the negative is now firm
+
+A dedicated eight-angle search (issue trackers, proxy source, Chinese-language forums,
+Reddit/HN, local-stack docs, chat templates, alternative harnesses, version matrices) plus a
+completeness pass found **no published, reproducible configuration for Claude Code >= 2.1.207
+against a self-hosted open-weight model on vLLM or SGLang.**
+
+Searched and empty: GitHub issues/PRs/code search; vLLM, SGLang, Unsloth, llama.cpp, Ollama,
+LM Studio and llama-swap docs; HN via the Algolia API; lobste.rs; linux.do; V2EX; CSDN;
+Japanese Qiita and Zenn; Reddit r/LocalLLaMA and r/ClaudeCode (reached by driving a real Chrome
+session — WebFetch and every Redlib mirror are blocked); and **discuss.vllm.ai**, which matters
+most because vLLM closed GitHub Discussions specifically to route people there and it has
+nothing on Claude Code since 2025. Still unsearched: Discord, Korean sources, X, video.
+
+The closest claims, all falling short:
+
+| Claim | CC version | Why it falls short |
+|---|---|---|
+| SGLang PR #28906 e2e trace | **2.1.185** | Highest claimed-working anywhere. Validates the *steer* case (system message followed by an assistant turn), not the *trailing* case #48874 is about |
+| [CodeRouter §6.1](https://github.com/zephel01/CodeRouter/blob/main/docs/guides/subagent-routing.en.md) | **2.1.206–207** | Real, dated (2026-07-11), with in-repo transcripts — but backend is **Ollama**, not vLLM/SGLang, and it verified *subagent routing*, not #48874 |
+| [linux.do post](https://linux.do/t/topic/2446432) | not stated | GLM-5.2-FP8 on 8×H200, vLLM, no proxy, screenshot. Dated **2026-06-22**, before the reproduction window |
+| [SGLang Anthropic API doc](https://docs.sglang.io/docs/basic_usage/anthropic_api) | not stated | Maintainer-authored, but one commit (2026-06-22), never updated, no version, no transcript, and silent on the system-role problem — while attributing "tool calls returned as raw text" solely to a missing `--tool-call-parser`, which will misdiagnose exactly this bug |
+
+Alternative harnesses (OpenHands, OpenCode, Goose, Aider) were assessed and all failed
+verification for this question — they are different harnesses, their vLLM instructions are
+placeholder config with no evidence anyone ran them, and switching relocates the tool-parser
+dependency rather than removing it. Aider is additionally stalled: last commit 2026-05-22.
+
+### The actual fix: turn the feature off from the client side
+
+Static analysis of the shipped Claude Code **2.1.220** binary
+(`/opt/homebrew/Caskroom/claude-code@latest/2.1.220/claude`) shows the mid-conversation system
+block is behind a per-model gate, verbatim:
+
+```js
+yer=Vr((e)=>{if(lK("hipaa"))return!1;
+  if(Z.CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM)return!0;
+  let t=wde(e,"mid_conversation_system");if(t!==void 0)return t;
+  let r=lo(e);
+  if(r.includes("claude-3-")||r==="claude-opus-4-0"||r==="claude-opus-4-1"||r==="claude-opus-4-5"
+   ||r==="claude-opus-4-6"||r==="claude-opus-4-7"||r==="claude-sonnet-4-0"||r==="claude-sonnet-4-5"
+   ||r==="claude-sonnet-4-6"||r==="claude-haiku-4-5")return!1;
+  if(LN(r,"mid_conv_system")||r==="claude-mythos-5")return!0;
+  return p9(n_(e))});
+```
+
+Three consequences:
+
+1. **A deny-listed model id switches the feature off.** `lo()` canonicalizes by *substring*, so
+   `lo("claude-sonnet-4-5[1m]")` returns `"claude-sonnet-4-5"` and hits the deny list. The 1M
+   path survives independently because `Wb(e)` tests the **raw** string. So you keep the long
+   context. Prefer `claude-sonnet-4-5` over `claude-opus-4-5` — the latter's registry entry has
+   `supports_1m_suffix` but no `supports_1m_beta`.
+2. **There is no off switch.** The only env var in the gate,
+   `CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM`, forces the feature *on* only.
+3. **This is why every self-hosted setup trips it.** The fallback is `p9(n_(e))`, and a plain
+   custom `ANTHROPIC_BASE_URL` still classifies as `firstParty`, so an unrecognized model id
+   returns **true** and the block is emitted.
+
+Note this quietly explains the linux.do post: it launches with
+`--served-model-name claude-opus-4-8 claude-opus-4-7 claude-opus-4-6 GLM-5.2`, and two of those
+aliases are deny-listed.
+
+### Step 0 — a ten-minute test that settles it for your stack
+
+Do this before installing anything. Send the same conversation to your own `/v1/messages`
+twice — once with the block as a trailing `{"role":"system"}` entry, once hoisted into the
+top-level `system` field — and compare `input_tokens` in the response `usage`.
+
+**Identical ⇒ your server hoists ⇒ that model is safe.** No debug config, no generation cost,
+works on vLLM or SGLang. On SGLang, `/v1/messages/count_tokens` does it for free.
+
+Run it per model, because there is an unresolved contradiction worth settling empirically:
+#48874 reports positional rendering on `Qwen3.6-35B-A3B-FP8`, yet that model's stock template
+carries `{%- if message.role == "system" %}{%- if not loop.first %}{{- raise_exception(...) }}`,
+which should force hoisting — so either the reporter overrode the template or the issue's
+diagnosis is incomplete. Trust your own measurement over both.
+
+### Ranked fixes if Step 0 shows a model is exposed
+
+1. **Serve under a deny-listed model id.** `--served-model-name claude-sonnet-4-5` plus
+   `ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-5[1m]`. Fires regardless of how the
+   capability lookup resolves, and keeps the 1M window. Cost: Claude Code applies that Claude
+   id's registry metadata — context window, capability set, cost display — to your model.
+   Derived from the shipped binary; **untested end-to-end by anyone.**
+2. **CodeRouter >= v2.9.4 in front.** The only tool that fixes the array shape at *zero*
+   prefix-cache cost — leading `system` hoisted, mid-conversation `system` coerced to `user`
+   in place. Verified in source with regression tests. Caveat: 43 stars, born 2026-04-19, but
+   genuinely active (100+ commits / 4 authors in 60d, MIT, v2.11.0 on 2026-07-28).
+3. **Guarded chat template**, or **pin vLLM 0.23.0 / SGLang 0.5.14** (last releases that
+   unconditionally hoist). Both buy correctness at the price of the prefix cache.
+4. **Do not count on:** `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` (verified no-op — the beta is
+   in the set *kept* on third-party endpoints); or waiting for upstream (vLLM 0.26.0 and CC
+   2.1.220 both ship without a fix, and Anthropic is still investing in the feature).
+
+Rule out three same-symptom confounds first, since each produces an identical text-only turn
+and none is #48874: a missing `--tool-call-parser`, llama.cpp without `--jinja`, and Unsloth
+Studio's server-side tool loop.
+
+**Version boundary, from the npm registry** (`registry.npmjs.org/@anthropic-ai/claude-code`):
+`2.1.150` published 2026-05-23, `2.1.153` on 2026-05-27, **`2.1.154` on 2026-05-28** — the
+release where the lean system prompt became default. So the safe pin below the boundary is
+**2.1.153**, which matches what cc-switch #3277 converged on, and it also sits below 2.1.161 so
+auto-compact still fires. Current `stable` is 2.1.212, `latest` 2.1.220.
+
+**Practical consequence for recommendation #1:** the no-proxy path is viable, but run Step 0
+first. Qwen3.6-27B and Kimi K3 look safe as-is. GLM-5.2-FP8 and gemma-4-31B need fix 1 or 2.
+And if you run Step 0 and publish the result, you will be the first — #48874 has one comment
+and no maintainer response since 2026-07-16, and the forum vLLM points people to is empty on
+this topic.
 
 **Why this matters more than tool choice.** Every translating proxy converts
 Anthropic → OpenAI → Anthropic, and each hop is where the documented failures live: dropped
