@@ -1,12 +1,21 @@
-# Claude Code against PLGrid Forge — verified working configuration
+# Claude Code against PLGrid Forge — investigation record
 
-**Status: verified end-to-end on 2026-07-30.** Claude Code **2.1.220** → CLIProxyAPI
-**7.2.110** → PLGrid Forge (`https://llmlab.plgrid.pl/api/v1`) → `zai-org/GLM-5.2-FP8`,
-completing a multi-turn agentic loop with parallel tool calls and a correct answer.
+**This is the investigation history, not the instructions.** For the current, verified setup use
+[`plgrid-claude-code-setup/README.md`](plgrid-claude-code-setup/README.md) and the config templates
+beside it.
 
-This is above the Claude Code version where the mid-conversation system-role regression
-appears (vLLM #48874, observed at 2.1.207), and no equivalent configuration was published
-anywhere as of 2026-07-30 — see `../research/claude-code-openai-compatible-proxies.md`.
+Kept because the reasoning is auditable and several conclusions here were later overturned by
+measurement — that trail is useful when something breaks or when deciding whether a finding still
+holds. **Sections below may describe superseded approaches.** Known reversals, newest first:
+
+| Superseded claim | Corrected by |
+|---|---|
+| Per-model context windows are impossible; declare `[1m]` everywhere | `CLAUDE_CODE_MAX_CONTEXT_TOKENS` sets any window exactly (measured 206k/269k/396k) |
+| GLM-5.2 unreliably shortcuts instructions | Retested: 5/5 tool calls raw, `tool_use=5 tool_result=5` via Claude Code — prompt-phrasing sensitivity, not unreliability |
+| `count_tokens` always returns 503 | Works 40/40; the 503s were a cooldown blackout |
+| Lost reasoning was `claude-code-router` bug #1400 | Wrong proxy — CCR was never installed. Real cause: our proxy read only `reasoning_content` while vLLM emits `reasoning` |
+| `haiku` should point at a cheaper model | Compaction runs on that tier; a smaller real window makes large conversations unsummarisable |
+| `/model` picker hides non-`claude` ids | It does not, for env-var-configured models |
 
 ---
 
