@@ -1,0 +1,53 @@
+# CLIProxyAPI config: Claude Code -> PLGrid Forge (ACK Cyfronet)
+# Put your grant key in PLGRID_API_KEY below, then: chmod 600 this file.
+# Get a key at llmlab.plgrid.pl -> Grants -> Generate API Key.
+#
+# Defaults deliberately overridden: upstream ships host:"" (all interfaces) with
+# fail-open auth, i.e. an open relay to your key.
+host: "127.0.0.1"
+port: 8317
+auth-dir: "~/.cli-proxy-api"
+debug: false
+request-log: true            # <auth-dir>/logs/*.log — the only way to diagnose translation issues
+
+# MANDATORY with a single credential. Cooldown is per (auth, model): any upstream
+# failure blacks that model out for ~60s and returns 503, so a compaction retry
+# hits the very model it needs. Verified: without this, 4 consecutive overflows
+# return 503 instead of 400.
+disable-cooling: true
+
+api-keys:
+  - "local-test-key"         # what Claude Code sends as ANTHROPIC_AUTH_TOKEN
+
+openai-compatibility:
+  - name: "plgrid"
+    base-url: "https://llmlab.plgrid.pl/api/v1"
+    api-key-entries:
+      - api-key: "PLGRID_API_KEY"
+    # The real context window is encoded in each alias so statusline.sh can show
+    # true usage. Claude Code strips the [1m] suffix before the wire, so aliases
+    # here must NOT contain it.
+    models:
+      - name: "zai-org/GLM-5.2-FP8"
+        alias: "glm-5.2-fp8-393k"
+      - name: "Qwen/Qwen3.6-27B"
+        alias: "qwen3.6-27b-262k"
+      - name: "google/gemma-4-31B"
+        alias: "gemma-4-31b-262k"
+      - name: "zai-org/GLM-4.7-Flash"
+        alias: "glm-4.7-flash-202k"
+      - name: "Qwen/Qwen3.6-35B-A3B"
+        alias: "qwen3.6-35b-a3b-262k"
+      - name: "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+        alias: "qwen3-coder-30b-249k"
+
+# MANDATORY. PLGrid validates with extra_forbidden and rejects reasoning_effort,
+# which CLIProxyAPI sends for reasoning-capable models. Without this, every
+# request fails with a bare 422 and no usable explanation.
+payload:
+  filter:
+    - models:
+        - name: "*"
+          protocol: "openai"
+      params:
+        - "reasoning_effort"
