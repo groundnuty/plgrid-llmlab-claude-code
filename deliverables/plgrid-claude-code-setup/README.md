@@ -97,14 +97,13 @@ opened**: `groundnuty/CLIProxyAPI@fix/normalize-vllm-context-limit-errors`. Usin
 build (Go 1.26):
 
 ```bash
-git clone https://github.com/groundnuty/CLIProxyAPI && cd CLIProxyAPI
-git checkout fix/accept-openai-reasoning-field          # thinking blocks — see below
-git merge --no-edit fix/normalize-vllm-context-limit-errors   # automatic context limits
-go build -o cli-proxy-api ./cmd/server
+git clone https://github.com/groundnuty/CLIProxyAPI && cd CLIProxyAPI   # main has both fixes
+go build -o cli-proxy-api ./cmd/server                                  # needs Go 1.26
 ```
 
-**Two independent fixes live on that fork, both verified against PLGrid.** The reasoning-field fix
-matters for every reasoning model and is the more important of the two.
+**Both fixes are merged into `main` on that fork** (`groundnuty/CLIProxyAPI`), so `main` is the stable
+branch — no branch-picking or merging needed. Neither fix is upstream yet and no PR is open. The
+reasoning-field fix matters for every reasoning model and is the more important of the two.
 
 Verified A/B on the same oversized request: stock leaks `API Error: 400 {"detail": …}`; patched
 emits `prompt is too long: 66511 tokens > 32768 maximum (…)`, which the client recognises.
@@ -390,3 +389,69 @@ done
 
 Run it when a model is added or a deployment is upgraded. It found the `reasoning` bug in one pass, and
 it is how the table above was built.
+
+## Final end-to-end verification, on the patched build
+
+An earlier round of tests ran against the **stock** proxy on port 8317, which proved the setup but not
+the fixes. Re-run in full against a binary built from `main` with both fixes (verified byte-identical
+by SHA-256 to the tested binary), single session, canonical settings:
+
+| Step | Result |
+|---|---|
+| Status line rendering real limit | `glm-5.2-fp8-393k[1m] · 0.0k/393k … 0%` |
+| Subagents on two other models | both bugs found and correctly diagnosed |
+| Thinking blocks reaching the client | **16 of 18 requests** carried them (0 on stock) |
+| Reasoning visible in the transcript | `∴ The user's message is …` rendered inline |
+| Auto-compaction firing | `✽ Compacting conversation…` at 111.4k |
+| Context after compaction | **111.4k → 34.6k** |
+| Session usable afterwards | yes, answered a follow-up |
+
+All four requirements hold on the patched build: model switching with the right window, subagents on
+different models, standard behaviour at the limit, and a full end-to-end run.
+
+## Known bugs and shortcomings
+
+Honest list of what is still wrong or unproven.
+
+### Model behaviour — the biggest open issue
+
+**GLM-5.2 shortcuts instructions, and restoring reasoning did not fix it.** In the final test it
+replied `OK01`–`OK04` to four "read this file completely" requests having called `Read` **once**,
+while thinking blocks were confirmed flowing. So the earlier theory — that the proxy discarding
+`reasoning` caused the shortcutting — is **weakened, not confirmed**. The reasoning fix is still
+correct and valuable, but it is not the explanation for this.
+
+Untested and still the cheapest next probe: **re-run non-streaming**.
+[vLLM #39757](https://github.com/vllm-project/vllm/issues/39757) shows GLM tool names silently
+truncated in streaming but correct with `stream=False`, and
+[#42400](https://github.com/vllm-project/vllm/issues/42400) reports exactly that behind Claude Code
+with this parser pair. That is vLLM-level, so a question for the operators as much as for us.
+
+Practical mitigation today: for work that must not be skipped, prefer explicit single-step prompts, or
+delegate to a `qwen3.6-27b-262k` subagent — which completed its audit correctly every time it was
+asked.
+
+### Shipping and process
+
+- **Neither fix is upstream.** Both are merged into `main` on `groundnuty/CLIProxyAPI` and verified,
+  but no PR is open against `router-for-me/CLIProxyAPI`. Until one lands, this needs a source build,
+  and rebasing on upstream releases is manual.
+- **[PR #4321](https://github.com/router-for-me/CLIProxyAPI/pull/4321) overlaps** the context-limit
+  fix and is open upstream. It gates on an `error.code` field PLGrid does not send and never produces
+  the `N tokens > M` shape the client needs, so it does not solve this case — but a PR should
+  reference it rather than conflict silently.
+
+### Untested surfaces
+
+Images, MCP tools behind the proxy, `--resume`, `availableModels` with these non-`claude` ids, and
+manual `/compact` on a model with adequate headroom (it was only exercised on the over-constrained
+32k case, where failure was correct).
+
+### Unexplained observations
+
+- **74 of 158 `count_tokens` calls returned 503 in one window**, and the cause was never established.
+  `disable-cooling: true` is the leading hypothesis and is now set, but the correlation was not
+  proven. Not reproducible since.
+- **`tool_choice: "required"` returns 500 on GLM-4.7-Flash** where other models return 200. Latent:
+  Claude Code never sent `tool_choice` in 40 logs. A `payload.override` forcing `auto` is the shim if
+  it ever surfaces.
