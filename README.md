@@ -116,17 +116,21 @@ between `config/cli-proxy-api.yaml` and the settings files** — a mismatch give
 The proxy is built from [`groundnuty/CLIProxyAPI`](https://github.com/groundnuty/CLIProxyAPI), whose
 `main` carries both fixes. Neither is upstream yet.
 
-**To make this easier for users, tag the fork.** It inherits upstream's CI, which fires on any tag:
+**The fork is tagged `v7.2.110-plgrid.1`** — upstream base plus our patch level, so provenance is
+obvious and rebasing on a new upstream release is a version bump.
 
-- `.github/workflows/release.yaml` uses only `secrets.GITHUB_TOKEN`, which **is** available on
-  forks — so tagging produces a GitHub Release with prebuilt binaries automatically, and `make build`
-  could be replaced by a download.
-- `.github/workflows/docker-image.yml` needs `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`, which a fork
-  does **not** inherit — that job will fail unless those secrets are added or it is repointed at
-  `ghcr.io` (which works with `GITHUB_TOKEN`).
+It inherits upstream's CI, which fires on any tag:
 
-Suggested tag: `v7.2.110-plgrid.1` — upstream base plus our patch level, so provenance is obvious and
-rebasing on a new upstream release is an obvious version bump.
+- `release.yaml` uses only `secrets.GITHUB_TOKEN`, which **is** available on forks — so it produces
+  a GitHub Release with prebuilt binaries, and `make build` could become a download.
+- `docker-image.yml` needs `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`, which a fork does **not**
+  inherit. That job will fail unless those secrets are added or it is repointed at `ghcr.io`, which
+  works with `GITHUB_TOKEN`.
+
+**One manual step remains:** GitHub disables Actions on forked repositories until a maintainer
+enables them once, in the fork's *Actions* tab. Until that click, the tag exists but no release is
+built — which is why `make build` currently compiles from source. After enabling, re-push the tag
+(`git tag -f v7.2.110-plgrid.1 && git push -f origin v7.2.110-plgrid.1`) to trigger the build.
 
 The real exit is upstream. The reasoning-field fix in particular affects **any** vLLM-backed gateway,
 not just LLMLab, so it is worth a PR. Note
