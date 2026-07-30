@@ -379,6 +379,51 @@ The honest reading: Z.ai's results show the model is strong in this harness unde
 they controlled and did not fully disclose. They are not evidence that a stock
 Claude-Code-to-vLLM setup works today.
 
+#### Survey: every vendor benchmark that uses Claude Code as a harness
+
+Model-card footnotes are where this methodology gets published, so 22 recent open-weight model
+cards were swept for Claude Code harness mentions (`https://huggingface.co/<repo>/raw/main/README.md`,
+all fetched 2026-07-30). Six of the 22 were gated (HTTP 401) and could not be read.
+
+| Card | Uses Claude Code as harness? | Version disclosed | Config disclosed |
+|---|---|---|---|
+| [zai-org/GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) | Yes — ProgramBench, Terminal-Bench 2.1 | **2.1.156**, **2.1.167** | Full sampling params |
+| [zai-org/GLM-5](https://huggingface.co/zai-org/GLM-5) | Yes — Terminal-Bench 2.0, CyberGym | **2.1.14**, **2.1.18** | Full sampling params |
+| [moonshotai/Kimi-K3](https://huggingface.co/moonshotai/Kimi-K3) | Yes — SWE-Marathon, PostTrainBench, OfficeQA Pro, SpreadsheetBench 2, Kimi Code Bench 2.0 | **none** | none |
+| [MiniMaxAI/MiniMax-M2](https://huggingface.co/MiniMaxAI/MiniMax-M2) | Yes — Multi-SWE-Bench, SWE-bench Multilingual, Terminal-Bench | none (pins Terminal-Bench repo commit `94bf692`) | max steps, run count |
+| [zai-org/GLM-5.1](https://huggingface.co/zai-org/GLM-5.1) | Cites others' Claude Code scores only | none | none |
+| [Qwen/Qwen3.6-27B](https://huggingface.co/Qwen/Qwen3.6-27B), [-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) | Only for *other* models' NL2Repo scores | none | `temp=1.0, top_p=0.95, max_turns=900` |
+| google/gemma-4-31B-it, MiniMax-M3, DeepSeek-V4-Pro, gpt-oss-120b, Mistral-Large-3, Kimi-K2-Instruct | **No mention** | — | — |
+
+**The answer to "does anyone benchmark above the breakage": no.** The complete set of Claude
+Code versions disclosed anywhere in this sweep is **2.1.14, 2.1.18, 2.1.156, 2.1.167** — all
+four from Z.ai, and the highest is 2.1.167. Nothing at or above **2.1.207**, where #48874 was
+observed. Every published Claude-Code-as-harness result sits below the breakage window.
+
+Read that carefully in both directions:
+
+- **It is not proof the bug is universal.** Absence of a disclosed version is not evidence of
+  an old one. Kimi K3 published weights on 2026-07-27 and ran the Claude Code harness on five
+  benchmarks without naming a version; they could well have been on 2.1.2xx. Unknowable from
+  the card.
+- **It is a real gap in the evidence base.** No vendor has published a reproducible
+  Claude-Code-as-harness result on a current Claude Code. So there is no published setup to
+  copy that is known to work today, and the one card with full parameters (GLM-5.2) is pinned
+  two behaviour changes back.
+
+Two side findings worth having:
+
+- **Kimi built its own harness rather than using Claude Code.** Kimi K3's headline coding
+  numbers (DeepSWE, Terminal-Bench 2.1, ProgramBench, FrontierSWE, MLS-Bench-Lite) all come
+  from an in-house "**Kimi Code**" harness, with Claude Code reserved for a secondary set. On
+  their own Kimi Code Bench 2.0 the footnote discloses "it attains **73.7** with the Claude
+  Code harness" against a table figure of ~72.9 for Kimi Code — roughly parity, so the switch
+  does not look performance-driven. (Column attribution read positionally from the HTML table;
+  treat the 72.9 as approximate.)
+- **MiniMax pins by git commit, not version** — Terminal-Bench's bundled `claude-code` at
+  commit `94bf692`. That is the only reproducibility-grade pin found in the sweep, and it is a
+  better convention than a version string.
+
 **Qwen3.6-27B has a parser-name trap.** The model card prescribes `--tool-call-parser
 qwen3_coder`; current vLLM docs and the vLLM recipe for this model both use **`qwen3_xml`**.
 Users report `qwen3_coder` degenerating into an infinite `!!!!!!!` stream on long inputs
