@@ -294,6 +294,11 @@ report the marker from each") rather than by effort ("read them completely").
 **Not upstream.** Both fixes need a source build and manual rebasing on upstream releases until a PR
 lands.
 
+**`request-log` stops writing.** After roughly 228 files in one `auth-dir`, no new request logs
+appeared even though traffic continued (confirmed 200s in the access log). Bodies are the only way
+to debug translation, so rotate or clear `<auth-dir>/logs/` before a debugging session rather than
+trusting that an empty result means no traffic.
+
 **Unexplained.** 74 of 158 `count_tokens` calls returned `503` in one window and the cause was never
 established (`disable-cooling: true` is the leading hypothesis, now set; not reproducible since). And
 GLM-4.7-Flash returns `500` on `tool_choice: "required"` where other models return 200 — latent,
