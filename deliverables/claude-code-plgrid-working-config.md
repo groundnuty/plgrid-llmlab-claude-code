@@ -856,3 +856,59 @@ and set `AUTO_COMPACT_WINDOW` for the largest model — the clamp handles the re
 200k cannot be expressed at all, because the threshold floor is 100,000 and the believed window
 cannot be lowered. For those the reactive path is the only protection, which is where the
 CLIProxyAPI patch earns its place.
+
+### Where the context limits actually come from
+
+Worth settling, because if the limits were served over REST the proxy could simply supply them.
+They are not.
+
+**1. Hardcoded in the client.** The 2.1.220 binary contains 14 `context:{window:…}` literals, with
+exactly **two** distinct values:
+
+```
+6 × context:{window:1e6
+8 × context:{window:200000
+```
+
+There is no third value anywhere in the registry, which is why the believed window is always
+~200k or ~1M and never anything in between.
+
+**2. A `max_input_tokens` field does exist — and is parsed.** The binary carries a schema for the
+gateway-discovery cache:
+
+```js
+E.object({ id: E.string(),
+           max_input_tokens: E.number().optional(),
+           max_tokens: E.number().optional() }).strip()
+E.object({ models: E.array(…), timestamp: E.number() })
+```
+
+read from `<config-dir>/cache/gateway-models.json`. Embedded docs confirm the Anthropic Models API
+returns "since Mar 2026 — `max_input_tokens` (the context window), `max_tokens` (the output cap)".
+
+**3. But Claude Code does not use it for the context window.** Tested directly by crafting that
+cache file, isolated via `CLAUDE_CONFIG_DIR` so nothing global was touched:
+
+| Cached claim | Model id | Registry entry exists? | Resulting window |
+|---|---|---|---|
+| `max_input_tokens: 393216` | `claude-sonnet-4-5` | yes | **200k** |
+| `max_input_tokens: 393216` | `glm-5.2-fp8` | no | **200k** |
+
+Both stayed at 200k. The field is accepted and parsed but does not drive context accounting, even
+when there is no built-in entry to outrank it.
+
+**Consequence: a gateway cannot advertise a context window.** The proxy can populate the picker —
+discovery worked and listed `glm-5.2-fp8`, `qwen3.6-27b`, `glm-4.7-flash` as "From gateway", which
+also shows the documented "ignores ids that don't begin with `claude` or `anthropic`" filter no
+longer holds in 2.1.220 — but names are all it can supply. Not windows.
+
+So every route to a per-model limit that runs *through* Claude Code is closed: hardcoded registry
+(two values), one global threshold env var, capability declaration inert behind a gateway, and now
+discovery metadata confirmed non-functional for this purpose. **Enforcement has to happen in the
+proxy**, either reactively from the upstream error or proactively from a per-model
+`context-window` in proxy config. That is not a workaround; it is the only remaining layer.
+
+This matters more as the model set grows. With one model above 200k the `[1m]` tier plus a single
+`AUTO_COMPACT_WINDOW` is sufficient. Adding Kimi K3 at ~1M gives two models above 200k with
+different real windows and one global threshold to serve both — no setting is correct for both,
+so proxy-side enforcement stops being optional.
