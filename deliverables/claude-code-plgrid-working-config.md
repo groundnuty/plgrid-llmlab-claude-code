@@ -98,6 +98,10 @@ auth-dir: "~/.cli-proxy-api"
 debug: false
 request-log: true          # writes <auth-dir>/logs/*.log — invaluable for diagnosis
 
+# Required with a single credential. Cooldown is per (auth, model) and on by default,
+# so any upstream failure blacks that model out and the retry gets 503. See below.
+disable-cooling: true
+
 api-keys:
   - "local-test-key"       # what Claude Code presents as ANTHROPIC_AUTH_TOKEN
 
@@ -619,6 +623,91 @@ patch below, not merely a nice-to-have.
 One clarification, since it is easy to conflate: **`count_tokens` is not what governs this.** It
 reports current *usage*, not the *limit*, and it works correctly here (40/40 in testing). Accurate
 usage was never the missing half; the limit was.
+
+### How to get a per-model limit: the complete answer
+
+**There is no first-party mechanism, and this is now exhaustive.** Claude Code's model registry
+holds exactly two context values — extracted from the 2.1.220 binary, every entry is either
+`window:200000` or `window:1e6`. So even the aliasing trick can only ever express 200k or 1M,
+never 393k / 262k / 202k. Combined with the three dead ends already established (one global env
+var read at startup; discovery carrying only `id` and `display_name`; capability declaration
+inert behind a gateway), nothing static can express a per-model limit.
+
+**The limit therefore has to come from the upstream, per request.** That is what the patch does,
+and it is why it is the answer rather than a workaround: the number arrives in the error of
+whichever model actually overflowed, so it is automatically right for the main agent and for
+every subagent, with no configuration and nothing to keep in sync.
+
+Three upstream error shapes were observed on this gateway. Two are compactable and are rewritten;
+one is not and is deliberately left alone:
+
+| Upstream message | Compactable? | Patch behaviour |
+|---|---|---|
+| `This model's maximum context length is 32768 tokens. However, your request has 66511 input tokens.` | yes | rewritten |
+| `'max_tokens' … is too large: 4096. This model's maximum context length is 32768 tokens and your request has 30850 input tokens (4096 > 32768 - 30850).` | yes — trimming input fixes it | rewritten |
+| `max_tokens=500000 cannot be greater than max_model_len=max_total_tokens=393216.` | no — only a smaller `max_tokens` fixes it | left unchanged |
+
+Observed effect on the client, same task and model, stock vs patched:
+
+```
+stock   : API Error: 400 {"detail": "'max_tokens' or 'max_completion_tokens' is too large…"}
+patched : Prompt is too long
+```
+
+The client now recognises the condition instead of surfacing raw upstream JSON. **Scope note:**
+this demonstrates recognition, not recovery — the test ran in `-p` mode where the very first
+request was already oversized, so there was no prior history to compact away and reporting the
+error is correct behaviour. Recovery in a long interactive session is Claude Code's own
+documented logic once the phrase matches; it has not been observed end-to-end here.
+
+### `disable-cooling: true` is required, not optional
+
+This turned out to be load-bearing and is easy to miss. CLIProxyAPI applies **per (auth, model)
+cooldown after a failure**, on by default:
+
+> `disable-cooling: false` — When true, disable auth/model cooldown scheduling globally
+> (prevents blackout windows after failure states).
+
+Measured with a single credential:
+
+```
+cooldown default (false)          disable-cooling: true
+  overflow 1 -> 503                 overflow 1 -> 400
+  overflow 2 -> 503                 overflow 2 -> 400
+  overflow 3 -> 503                 overflow 3 -> 400
+  overflow 4 -> 503                 overflow 4 -> 400
+```
+
+The cooldown is scoped to the (credential, model) pair — during a bielik blackout, `glm-5.2-fp8`
+requests still returned 200. With one credential per provider, as here, an overflow blacks out
+**the very model that needs to retry**, and the compaction retry hits `503 auth_unavailable:
+no auth available` instead of succeeding. Cooldown exists to rotate across a credential pool;
+with a single grant key it only causes harm.
+
+Add to the proxy config:
+
+```yaml
+disable-cooling: true
+```
+
+This also **resolves the earlier `count_tokens` 503 mystery**, retracted above as unexplained.
+Those 74 failures followed the `reasoning_effort` 422s: the failures put the model into cooldown,
+and subsequent `count_tokens` calls for the same model returned `503` in ~1ms. Not a
+`count_tokens` defect at all — a cooldown blackout. The retraction stands; the cause is now known.
+
+### Optional: proactive limits
+
+If the wasted round trip matters — an overflowing request uploads the full oversized payload
+before being rejected — the proxy could enforce limits pre-flight. It already has the pieces: a
+per-model `context-window` value would go in the `openai-compatibility` models list, and
+`helps.TokenizerForModel` / `helps.CountOpenAIChatTokens` already power the working
+`count_tokens` endpoint. A pre-dispatch check could emit the same normalised message at, say,
+90% of the window.
+
+Worth knowing before building it: that tokenizer is tiktoken-based, so counts for GLM, Qwen and
+Gemma are approximations, and a wrong estimate either compacts too eagerly or misses. The
+upstream's own count is authoritative. Treat proactive checking as a latency optimisation layered
+on top of the reactive path, never as a replacement.
 
 ### The fix worth contributing
 
