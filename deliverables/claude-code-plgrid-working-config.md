@@ -401,6 +401,133 @@ against 395 opened — so a patch there is likely to land and persist. The gap i
 endpoint and translator hook already exist; they need connecting for `openai-compatibility`
 providers, with a local estimate as fallback. That is the contribution worth making.
 
+## Recommended shape: honest model ids, config in `settings.json`
+
+The alias-onto-Claude-ids approach solves the context window but creates two new problems: the
+picker says "Sonnet 4.5" when you are talking to GLM-5.2, and it shows Anthropic price labels
+that do not apply. Testing both, **honest ids are the better trade** — with one consequence to
+manage, covered below.
+
+### Real model names in the picker
+
+`ANTHROPIC_DEFAULT_*_MODEL_NAME` and `_DESCRIPTION` work behind a gateway, per the docs: "The
+`_NAME` and `_DESCRIPTION` variables also take effect when `ANTHROPIC_BASE_URL` points to an
+LLM gateway."
+
+**But `_NAME` is ignored when the model id matches a built-in Claude row.** Verified: with
+`ANTHROPIC_DEFAULT_SONNET_MODEL='claude-sonnet-4-5[1m]'`, the picker showed *"Sonnet 4.5 (1M
+context)"* and ignored `_NAME` entirely, while the haiku slot — pointing at a non-suffixed id —
+picked up its override and displayed *"gemma-4-31B"*. So **you can have the real name or the 1M
+window, not both.**
+
+With honest ids the picker becomes self-documenting, and no override is needed for the name at
+all because the id *is* the name:
+
+```
+1. Default (recommended)  Use the default model (currently glm-5.2-fp8[1m])
+4. glm-5.2-fp8            PLGrid Forge · GLM-5.2 FP8 · 393k ctx
+5. gemma-4-31b            PLGrid Forge · Gemma 4 31B · 262k ctx · compaction
+```
+
+Status line reads `glm-5.2-fp8 xhigh`. Price labels disappear, which is correct — they never
+applied. Use `_DESCRIPTION` to carry the window and the slot's purpose, since that is the part
+the id cannot express.
+
+### Stop setting env vars by hand: use the `env` block
+
+Everything above belongs in a committed `.claude/settings.json`, not in shell exports. Verified
+working — the entire session below ran with no exported variables at all:
+
+```json
+{
+  "permissions": {
+    "allow": ["Read","Glob","Grep","Edit","Write",
+              "Bash(python3:*)","Bash(echo:*)","Bash(ls:*)","Bash(cat:*)"],
+    "deny": ["Bash(rm:*)","Bash(git push:*)","Bash(curl:*)"]
+  },
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8317",
+    "ANTHROPIC_AUTH_TOKEN": "local-test-key",
+    "ANTHROPIC_MODEL": "glm-5.2-fp8",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.2-fp8",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION": "PLGrid Forge · GLM-5.2 FP8 · 393k ctx",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2-fp8",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION": "PLGrid Forge · GLM-5.2 FP8 · 393k ctx",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gemma-4-31b",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION": "PLGrid Forge · Gemma 4 31B · 262k ctx · compaction",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32768",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "190000",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "DISABLE_AUTOUPDATER": "1"
+  }
+}
+```
+
+Set it once per project, commit it, done. Note this file must not contain the PLGrid key — that
+stays in the proxy's config. `ANTHROPIC_AUTH_TOKEN` here is only the local proxy token.
+
+## The context-window problem, properly
+
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` is a single global value, but the models differ: GLM-5.2
+393,216 · Qwen3.6-27B 262,144 · gemma-4-31B 262,144 · GLM-4.7-Flash 202,752. One number cannot
+be right for all of them, and switching models mid-project should not require editing config.
+
+### What actually happens at the limit
+
+PLGrid returns a precise, machine-readable error that even states the true window:
+
+```json
+{"detail":"max_tokens=500000 cannot be greater than max_model_len=max_total_tokens=393216.
+           Please request fewer output tokens. (parameter=max_tokens, value=500000)",
+ "status_code":400}
+```
+
+**Claude Code will not recognise it.** Extracted from the 2.1.220 binary, the pattern it matches
+to trigger reactive compaction is:
+
+```
+prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)
+```
+
+It needs the literal phrase *"prompt is too long"* followed by `<used> tokens > <limit>`.
+PLGrid's wording matches neither. So on overflow you get a hard error, not a compaction — which
+is exactly why the env var is currently load-bearing.
+
+This also explains why the env var cannot be dropped yet, and it is the one thing standing
+between this setup and a genuinely good experience.
+
+### Interim: one conservative value
+
+Until the above is fixed, set `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to the **smallest** window among
+the models you have enabled — 190,000 above, safe even for GLM-4.7-Flash. You lose headroom on
+GLM-5.2, but you never hit a hard failure. Pair it with `availableModels` so the set of reachable
+models is known and the floor is predictable.
+
+### The fix worth contributing
+
+Normalise the upstream error in the proxy into the shape Claude Code matches. Then compaction
+fires at the right point **for every model automatically**, with no env var and no per-model
+tuning — the window comes from the upstream error itself.
+
+CLIProxyAPI has an open, unmerged PR for exactly this area — **#4321 "fix(translator): normalize
+context-limit errors"** (83 additions, `sdk/api/handlers/claude/code_handlers.go`). It is not
+sufficient for PLGrid, for two concrete reasons:
+
+1. It gates on `upstreamCode` being `context_length_exceeded` or `context_too_large`, read from
+   `error.code`. PLGrid returns `{"detail": …, "status_code": 400}` with no `code` field, so the
+   branch never fires.
+2. It only prepends `"Prompt is too long: " + message`. Claude Code's regex additionally requires
+   `(\d+) tokens > (\d+)`, which PLGrid's wording does not contain — so even when the branch does
+   fire, the capture groups fail and no compaction is triggered.
+
+The contribution is to extend that normaliser to recognise vLLM/PLGrid-style phrasing
+(`max_model_len`, `max_total_tokens`, `maximum context length`), extract the two numbers, and emit
+the canonical `prompt is too long: <used> tokens > <limit>`. Combined with wiring up
+`count_tokens` for `openai-compatibility` providers, that is two small, well-scoped PRs against
+the healthiest project in this space — and between them they remove the last two pieces of manual
+tuning from this setup.
+
 ## Model notes for this gateway
 
 Measured limits from the OpenCode plugin (`.opencode/plugins/plgrid.js`), which took them from
