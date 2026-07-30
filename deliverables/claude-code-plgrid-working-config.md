@@ -157,6 +157,58 @@ claude
   system prompt, so the KV prefix misses every turn. Unsloth measures the cost as "90% slower
   with local models".
 
+## Differential test across every tool-capable model
+
+Same task, same config, one run each, 2026-07-30. The task requires a `Glob`, three parallel
+`Read` calls, then a synthesis turn — so it exercises multi-turn survival, parallel tool-call
+translation, and instruction-following. Correct answer is `a.txt, b.txt, c.txt` and `3`.
+
+| Model | Time | Answer | Verdict |
+|---|---|---|---|
+| `glm-5.2` | 11s | `a.txt, b.txt, c.txt — total word count: 3` | **correct** |
+| `qwen3.6-35b-a3b` | 14s | `a.txt, b.txt, c.txt — 3` | **correct** |
+| `gemma-4-31b` | 16s | `a.txt, b.txt, c.txt 3` | **correct** |
+| `qwen3-coder-30b` | 28s | `a.txt b.txt c.txt Total word count: 3` | **correct** |
+| `qwen3.6-27b` | 50s | `a.txt, b.txt, c.txt — total word count: 3` | **correct** |
+| `glm-4.7-flash` | 12s | `a.txt b.txt c.txt — 21 words` | **silently wrong** |
+| `qwen3.5-397b` | 1s | `400 … not available for grant '94'` | grant-blocked |
+| `qwen3.5-122b` | 1s | `400 … not available for grant '94'` | grant-blocked |
+| `deepseek-v4-flash` | 1s | `400 … not available for grant '94'` | grant-blocked |
+
+**Six of six reachable models completed the agent loop.** Not one produced the #48874
+signature (a text-only turn with no tool calls). That is the strongest available evidence that
+CLIProxyAPI's in-place role coercion is sufficient, and it holds across three model families.
+
+Three findings worth acting on:
+
+1. **`gemma-4-31b` works — this corrects a pessimistic prediction.** An independent Jinja probe
+   of its stock chat template (see `../research/probe-chat-template-48874.py`) shows it renders
+   a mid-conversation system message *inline*, which is the #48874 exposure condition, and
+   vLLM has two open `gemma4` tool-parser bugs (#39392, #44522). It works here anyway, because
+   the proxy coerces the role to `user` before the template ever sees it. **A proxy-side fix
+   makes template exposure irrelevant** — which is the practical argument for the proxy over a
+   server-side patch, and it only becomes visible by testing.
+2. **`glm-4.7-flash` is the one to avoid.** It completed the loop and read the right files —
+   it returned all three filenames — but reported 21 words instead of 3. Plumbing fine, answer
+   confidently wrong, which is the worst failure mode for unattended work. Note this contradicts
+   the `fastfix` selection in `opencode.json`, which cites "perfect differential correctness"
+   for this model at 123 tok/s. Different harness, different result; re-benchmark before
+   trusting it under Claude Code.
+3. **Grant 94 cannot reach three of the advertised models.** `GET /models` lists
+   `Qwen/Qwen3.5-397B-A17B-FP8`, `Qwen/Qwen3.5-122B-A10B` and `deepseek-ai/DeepSeek-V4-Flash`,
+   but all three return `400 … not available for grant '94'`. The model list is gateway-wide,
+   not grant-scoped, so enumeration is not entitlement. This also means the OpenCode plugin's
+   omission of DeepSeek-V4-Flash is defensible rather than an oversight.
+
+**Speed vs correctness.** `glm-5.2` is both the fastest correct model (11s) and the most
+capable, so the tier assignment in this document stands. `gemma-4-31b` at 16s is a sound haiku
+tier — it was correct, and compaction does not need frontier reasoning. `qwen3.6-27b` is
+correct but 4.5× slower; keep it for the reviewer role as `opencode.json` already does.
+
+Caveat: one run per model on a trivial task. This establishes that the *transport and tool
+loop* work per model; it is not a capability benchmark. `glm-4.7-flash`'s failure was an
+arithmetic slip, not a protocol failure.
+
 ## Model notes for this gateway
 
 Measured limits from the OpenCode plugin (`.opencode/plugins/plgrid.js`), which took them from
