@@ -233,3 +233,58 @@ trusted.` So for unattended first runs, the trust state has to be seeded in adva
 
 Images, MCP tools, manual `/compact`, `--resume`, and `availableModels` with these non-`claude`
 ids. Subagent routing to different models **is** verified.
+
+## Model choice — and a caution about blaming the model
+
+Research summary: `../../research/plgrid-model-selection-for-agentic-coding.md`.
+
+**Recommended:** `glm-5.2-fp8-393k` as primary — the only candidate with published tool-use numbers
+(MCP-Atlas 76.8, Tool-Decathlon 48.2, against 62.8 / 26.9 for Qwen3.6-35B-A3B) and fastest-and-correct
+in local testing. `qwen3.6-27b-262k` as reviewer subagent — best coding numbers available
+(SWE-bench Verified 77.2 vs 73.4 for the A3B MoE, Terminal-Bench 2.0 59.3 vs 51.5), and its 50s
+latency is irrelevant for a review pass. **Avoid** `glm-4.7-flash-202k`: it returned a wrong answer
+here, and publishes no tool-use benchmark at all.
+
+**The important caveat: the instruction-shortcutting we observed on GLM-5.2 is probably not the
+model.** Two documented gateway/serving bugs explain it without invoking any model weakness, and
+both apply to the Qwen fallbacks too:
+
+- **[vLLM #42400](https://github.com/vllm-project/vllm/issues/42400)** — *"GLM-5.1 tool call parsing
+  fails intermittently when used as backend for Claude Code"*, with `--tool-call-parser glm47
+  --reasoning-parser glm45` and MTP enabled. Root-caused to two streaming parser bugs:
+  [#39757](https://github.com/vllm-project/vllm/issues/39757), where a tool name is silently
+  truncated (`get_weather` → `get`) in streaming but correct with `stream=False`; and #36857, where
+  arguments arrive only in the final chunk. Failures cluster near the context limit.
+- **[claude-code-router #1400](https://github.com/musistudio/claude-code-router/issues/1400)** — the
+  `thinking` field is not reliably mapped to `reasoning_content` on assistant tool-call turns. This
+  matters specifically for GLM: [Z.ai's docs](https://docs.z.ai/guides/capabilities/thinking-mode)
+  require that *"the complete, unmodified reasoning_content"* be returned, and thinking is on by
+  default. Unlike Kimi, GLM does not error — it proceeds without its own plan.
+  [#1397](https://github.com/musistudio/claude-code-router/issues/1397) documents the same class of
+  bug dropping tool-call argument deltas for Qwen3.6-35B-A3B, taking valid tool calls from 10/10 to
+  0/10.
+
+Note these are reported against other proxies and vLLM directly; **we have not confirmed either in
+CLIProxyAPI against PLGrid.** Diagnose before switching model — in this order:
+
+1. Re-run a multi-step tool task **non-streaming** (#39757 vanishes at `stream=False`). Highest
+   information for one test; separates parser from model.
+2. Check whether the proxy round-trips `reasoning_content` on assistant tool-call messages.
+3. Keep `tool_choice` at `auto` — [vLLM #50399](https://github.com/vllm-project/vllm/issues/50399)
+   shows GLM-5.2-FP8 emitting ~127 duplicate tool calls under `"required"`.
+4. Only then adjust sampling. No source attributes GLM shortcutting to temperature.
+
+Also worth passing to the PLGrid operators: the vLLM recipe states *"If you need tool calling and MTP
+at the same time, use the latest `main` branch"*, while its own recommended command enables both.
+And the vendor's Terminal-Bench 2.1 claim of 81.0 is worth discounting — the
+[official leaderboard](https://www.tbench.ai/leaderboard/terminal-bench/2.1) puts GLM-5.1 **in Claude
+Code** at 58.7%, below Z.ai's own harness numbers.
+
+**Serving settings for the reviewer subagent** (from the Qwen3.6-27B card): temperature 0.6,
+top_p 0.95, top_k 20, min_p 0.0, presence_penalty 0.0 — the "precise coding" preset. Note the
+Qwen3.6-35B-A3B card's *general* preset uses presence_penalty 1.5, which would penalise the
+legitimately repetitive structure of tool calls; use the coding preset for agent work.
+
+**No candidate publishes IFEval, IFBench, or Multi-IF**, and BFCL v4 scores are not extractable.
+The benchmark family that would most directly measure instruction adherence is absent for all six
+models — worth knowing before treating any of these numbers as decisive on this axis.
