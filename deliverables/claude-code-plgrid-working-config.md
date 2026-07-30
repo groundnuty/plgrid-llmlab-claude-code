@@ -810,3 +810,49 @@ Expected: a correct single-line answer. Then inspect `<auth-dir>/logs/v1-message
 confirm the outgoing message array ends on a `user` turn rather than a `system` one, and that
 `assistant(tool_calls)` / `tool` pairs appear across multiple requests. A text-only reply with
 `stop_reason: end_turn` and no tool calls is the #48874 signature.
+
+---
+
+## Requirements test: per-model windows and compaction
+
+Requirements under test, as stated: **R1** switch model in the main agent and have the window
+adjust; **R2** subagents on other models each with a correct window; **R3** at the limit, standard
+behaviour — auto-compact off says the context is full, auto-compact on compacts and proceeds.
+
+### R1/R2 — measured: the believed window *is* per model, in two tiers
+
+Claude Code's believed window was measured directly, by reading the status-line percentage against
+the reported token total (`window ≈ tokens ÷ pct`):
+
+| `ANTHROPIC_MODEL` | `AUTO_COMPACT_WINDOW` | Tokens | Status line | Believed window |
+|---|---|---|---|---|
+| `glm-5.2-fp8` | unset | 26,727 | 13.0% | **~206k** |
+| `glm-5.2-fp8[1m]` | unset | 28,768 | 3.0% | **~959k** |
+| `glm-5.2-fp8[1m]` | 380000 | 28,755 | 3.0% | ~958k |
+
+Two findings:
+
+1. **The window follows the model id**, so it does vary per model within one process — a subagent
+   on a bare id sees ~200k while the main agent on a `[1m]` id sees ~1M. That satisfies R1 and R2
+   in the coarse sense, and it is the only per-model window mechanism that exists.
+2. **`CLAUDE_CODE_AUTO_COMPACT_WINDOW` does not change the believed window.** Row three is
+   identical to row two. It sets the *compaction threshold*, which the docs say is "clamped to at
+   least 100,000 tokens and at most the model's context window" — so the clamp is what makes it
+   effectively per-model.
+
+Mapped onto this gateway's models, that gives:
+
+| Model | Real window | Recommended id | Believed | Effective compaction point | Safe? |
+|---|---|---|---|---|---|
+| GLM-5.2-FP8 | 393,216 | `glm-5.2-fp8[1m]` | ~1M | `ACW`, e.g. 380,000 | yes |
+| Qwen3.6-27B | 262,144 | `qwen3.6-27b` | ~200k | clamped to ~200k | yes, conservative |
+| gemma-4-31B | 262,144 | `gemma-4-31b` | ~200k | clamped to ~200k | yes, conservative |
+| GLM-4.7-Flash | 202,752 | `glm-4.7-flash` | ~200k | clamped to ~200k | yes, just inside |
+| Bielik-11B | 32,768 | — | ~200k | clamped to ~200k | **no — overflows** |
+
+**So R1 and R2 are satisfiable for every model at or above 200k**, with no patch and no dynamic
+mechanism: put `[1m]` on ids whose real window exceeds 200k substantially, leave it off otherwise,
+and set `AUTO_COMPACT_WINDOW` for the largest model — the clamp handles the rest. Models *below*
+200k cannot be expressed at all, because the threshold floor is 100,000 and the believed window
+cannot be lowered. For those the reactive path is the only protection, which is where the
+CLIProxyAPI patch earns its place.
