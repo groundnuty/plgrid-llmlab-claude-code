@@ -270,6 +270,137 @@ dead. Note this also **corrects a widely-reported claim**: the picker does *not*
 non-Claude model ids when they are configured via the `ANTHROPIC_DEFAULT_*_MODEL` env vars.
 That reported limitation applies to gateway model *discovery*, not to env-var configuration.
 
+## Follow-ups, all verified 2026-07-30
+
+### Recovering the context window: alias onto a Claude id
+
+Aliasing the upstream model onto a Claude id makes Claude Code apply that id's registry
+metadata, including its context window. Verified: with `claude-sonnet-4-5[1m]`, `/context`
+reported 42,467 tokens at **4.0%** — a ~1M window, against 200k for the bare `glm-5.2` id.
+
+```yaml
+    models:
+      - name: "zai-org/GLM-5.2-FP8"
+        alias: "claude-sonnet-4-5"    # deny-listed id; entry has supports_1m_beta
+      - name: "zai-org/GLM-5.2-FP8"
+        alias: "claude-opus-4-7"
+      - name: "google/gemma-4-31B"
+        alias: "claude-haiku-4-5"
+```
+
+```bash
+export ANTHROPIC_MODEL='claude-sonnet-4-5[1m]'
+export ANTHROPIC_DEFAULT_SONNET_MODEL='claude-sonnet-4-5[1m]'
+export ANTHROPIC_DEFAULT_OPUS_MODEL='claude-opus-4-7'
+export ANTHROPIC_DEFAULT_HAIKU_MODEL='claude-haiku-4-5'
+export CLAUDE_CODE_AUTO_COMPACT_WINDOW=380000   # REQUIRED — see below
+```
+
+**`CLAUDE_CODE_AUTO_COMPACT_WINDOW` is not optional here.** The 1M declaration overshoots:
+PLGrid caps GLM-5.2 at 393,216, so Claude Code would otherwise let a session run to ~1M and
+the gateway would reject it. Setting the window to 380,000 makes compaction fire before the
+real ceiling. The alias fixes an under-estimate by creating an over-estimate; the env var
+reconciles them.
+
+Side benefit: `claude-sonnet-4-5`, `claude-opus-4-7` and `claude-haiku-4-5` are all on the
+mid-conversation-system deny list, so this also suppresses that block at the client. Redundant
+given CLIProxyAPI's coercion, but harmless.
+
+### Hiding the paid Anthropic models from `/model`
+
+`availableModels` + `enforceAvailableModels` in **project** `.claude/settings.json` works on
+2.1.220, despite the docs describing them as managed/policy settings:
+
+```json
+{
+  "availableModels": ["claude-sonnet-4-5", "claude-opus-4-7", "claude-haiku-4-5"],
+  "enforceAvailableModels": true
+}
+```
+
+Picker before: 7 entries, 4 of them real paid models that fail against PLGrid.
+Picker after: 5 entries — *Fable*, *Opus 5* and *Sonnet 5* are gone.
+
+```
+1. Default (recommended)      currently Opus 4.7 (1M context) · $5/$25 per Mtok
+2. claude-opus-4-7            Custom Opus model
+3. Sonnet 4.5                 (claude-sonnet-4-5-20250929)      <-- still dead
+4. claude-haiku-4-5           Custom Haiku model
+5. Sonnet 4.5 (1M context) ✔  (claude-sonnet-4-5[1m])
+```
+
+Two residues worth knowing. Entry 3 is Claude Code's **built-in dated row**, surfaced because
+`availableModels` matched `claude-sonnet-4-5` as a version prefix — it sends
+`claude-sonnet-4-5-20250929`, which the proxy does not alias, so it fails. Add an alias for the
+dated id if you want all rows live. And `enforceAvailableModels` is needed for entry 1: without
+it, Default is exempt from the allowlist.
+
+The `$5/$25 per Mtok` label is cosmetic. The docs state prices are "a display label only; it
+doesn't affect which model a row selects or what your provider bills."
+
+### Autonomous operation without `--dangerously-skip-permissions`
+
+**Auto mode is unavailable with these models.** The banner says so outright — `auto mode
+unavailable for this model` — and the session falls back to `⏸ manual mode`. That also corrects
+an earlier read: the "Bash classifier is temporarily unavailable" seen in the first test was not
+an artifact of nesting, it was auto mode genuinely unsupported for a non-first-party model.
+
+You do **not** need the bypass flag. `permissions.allow` is deterministic pre-approval with no
+classifier involved, so it is model-independent. On first run Claude Code confirms:
+*"Edit, Write, Bash(python3:*), Bash(ls:*), Bash(cat:*), Read, Glob, and Grep — These will apply
+without asking."*
+
+```json
+{
+  "permissions": {
+    "allow": ["Read", "Glob", "Grep", "Edit", "Write",
+              "Bash(python3:*)", "Bash(echo:*)", "Bash(ls:*)", "Bash(cat:*)"],
+    "deny": ["Bash(rm:*)", "Bash(git push:*)", "Bash(curl:*)"]
+  }
+}
+```
+
+**The gotcha that will cost you the most Enters: rules match per command segment, so a compound
+command needs *every* segment allowed.** GLM-5.2 habitually appends `; echo "exit: $?"`, and
+`Bash(python3:*)` alone does not cover it — the prompt fires on the `echo`. Hence
+`Bash(echo:*)` in the list above. Choosing "don't ask again" writes an exact-string rule to
+`.claude/settings.local.json`:
+
+```json
+{"permissions": {"allow": ["Bash(echo \"exit: $?\")"]}}
+```
+
+That is literal, not a pattern, so it only covers that one string. Prefer pre-declaring
+`Bash(echo:*)`. The general lesson: watch which command shapes your model emits and allow
+those, rather than reaching for a blanket bypass.
+
+Verified end-to-end in this mode: GLM-5.2 read the file, patched `median()` correctly, re-ran
+the suite, and reported *"Fixed. For even-length input the median now averages the two middle
+elements (stats.py:1), and python3 run_tests.py exits 0 with PASS."* at 21.6k tok/s.
+
+### Open defect: `count_tokens` returns 503
+
+Every `POST /v1/messages/count_tokens` through CLIProxyAPI's `openai-compatibility` path returns
+**503**. The route exists and the Claude→OpenAI translator registers a `TokenCount` hook, but it
+is not wired for this provider type. Claude Code degrades to local estimation, so `/context`
+still renders and nothing visibly breaks — the risk is compaction accuracy, which matters more
+once `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is doing real work.
+
+**On whether to switch tools rather than fix this** — the alternatives are worse on balance:
+
+| Tool | `count_tokens` on an OpenAI-compatible upstream | Verdict |
+|---|---|---|
+| CLIProxyAPI | 503 (observed) | gap, but small and well-scoped |
+| musistudio/claude-code-router | answered locally as an estimate | works, but translation engine is a closed npm bundle with `repository: None`, config is SQLite-via-UI only, and it rewrites `~/.claude/settings.json` |
+| LiteLLM | routes to `api.anthropic.com` instead of `api_base` (#30043) | broken for self-hosted, plus the Responses trap |
+| CodeRouter | not established | role handling is right, but 43 stars |
+
+Switching to gain an *estimate* is a bad trade. CLIProxyAPI is the healthiest project in this
+space by a wide margin — 628 commits and 45 distinct authors in 60 days, 608 issues closed
+against 395 opened — so a patch there is likely to land and persist. The gap is narrow: the
+endpoint and translator hook already exist; they need connecting for `openai-compatibility`
+providers, with a local estimate as fallback. That is the contribution worth making.
+
 ## Model notes for this gateway
 
 Measured limits from the OpenCode plugin (`.opencode/plugins/plgrid.js`), which took them from
