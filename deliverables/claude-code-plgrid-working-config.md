@@ -912,3 +912,72 @@ This matters more as the model set grows. With one model above 200k the `[1m]` t
 `AUTO_COMPACT_WINDOW` is sufficient. Adding Kimi K3 at ~1M gives two models above 200k with
 different real windows and one global threshold to serve both — no setting is correct for both,
 so proxy-side enforcement stops being optional.
+
+### Does reactive auto-compaction actually fire? What the client code shows
+
+The extracted numbers are not merely displayed — they drive a decision. From the 2.1.220 binary:
+
+```js
+function HYr(e){ let t = e.match(/prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)/i);
+                 return { actualTokens: …, limitTokens: … } }
+
+function air(e){ if(!Z2e(e) || !e.errorDetails) return;
+                 let {actualTokens:t, limitTokens:r} = HYr(e.errorDetails);
+                 if(t===void 0 || r===void 0) return;
+                 let n = t - r; return n>0 ? n : void 0 }        // the overshoot
+```
+
+Two things follow. The regex is **case-insensitive** (`/i`), so capitalisation of the phrase does
+not matter. And `air()` computes *how many tokens over the limit the request was* — a quantity only
+useful for deciding how much to remove.
+
+The strongest evidence is the failure messages, which exist only for the case where compaction
+**cannot** help:
+
+> `· this conversation is a single exchange and cannot be compacted — the request size comes mostly from system prompt, tool definitions, or attachments.`
+>
+> `· the request is ~${t} tokens (limit ${r}) and this conversation's own content is most of it. A single-exchange conversation cannot be compacted; start with less content.`
+>
+> `· the request is ~${t} tokens (limit ${r}) but this conversation is only ~${n} tokens — the rest is system prompt, tool definitions, and attachment content.`
+
+Purpose-built explanations for "cannot compact" only make sense if compaction is otherwise
+attempted. This also explains the Bielik observation exactly: a bare `Prompt is too long` with no
+elaboration is the single-exchange branch, which is what that test was — one oversized first
+request with no history to summarise. Correct behaviour, not a failure.
+
+**So the answer is yes, with one honest qualification:** the code path for reactive compaction
+exists, consumes the numbers the patch supplies, and its "cannot compact" branch was observed
+firing for the right reason. A multi-turn session recovering by compaction has not been watched
+end to end — attempts were defeated by GLM-5.2 declining to load large files (it substituted
+`tail`, then claimed completion after two of five requested reads) rather than by any failure of
+the mechanism.
+
+### The recommended design, given all of the above
+
+This is the shape the evidence supports, and it needs no per-model Claude Code configuration:
+
+1. **Declare `[1m]` on every model.** Claude Code then never compacts prematurely, because it
+   believes it has room. The real limit is enforced by the upstream, which knows it exactly.
+2. **Put the real limit in the model alias**, since the alias is arbitrary and appears in both the
+   picker and the status line:
+   ```yaml
+   - name: "zai-org/GLM-5.2-FP8"
+     alias: "glm-5.2-fp8-393k"
+   - name: "Qwen/Qwen3.6-27B"
+     alias: "qwen3.6-27b-262k"
+   ```
+   Then `ANTHROPIC_MODEL=glm-5.2-fp8-393k[1m]`. The `[1m]` suffix is matched by
+   `/\[1m\]/i` against the raw string, so it works on any id.
+3. **Show absolute tokens in the status line**, not a percentage — a percentage would be computed
+   against the declared 1M and would mislead. Absolute usage read against the limit in the name
+   gives the operator a correct picture with no client support required.
+4. **Leave `autoCompactEnabled: true`.** On overflow the upstream reports the real limit, the patch
+   restates it in the phrase the client matches, and compaction proceeds. With it off, the user
+   gets the "Prompt is too long" message and can `/compact` or rewind manually — which is the
+   stated fallback and works today.
+5. **`disable-cooling: true` in the proxy**, without which the retry hits a blacked-out model.
+
+The one thing this design gives up: because every model declares 1M, Claude Code's own percentage
+and its proactive compaction are meaningless. All limit enforcement moves to the
+upstream-plus-proxy path. That is a deliberate trade, and it is the only one that scales to a
+growing model set with differing windows.
