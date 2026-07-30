@@ -1,19 +1,27 @@
 # Claude Code on PLGrid LLMLab — proxy lifecycle.
 # The proxy is a hard dependency: Claude Code speaks Anthropic dialect, LLMLab speaks OpenAI.
 
-REPO    := $(shell pwd)
-FORK    := https://github.com/groundnuty/CLIProxyAPI
-SRC     := $(REPO)/.cli-proxy-api/src
-BIN     := $(REPO)/.cli-proxy-api/cli-proxy-api
-CONFIG  := $(REPO)/config/cli-proxy-api.local.yaml
-PORT    := $(shell sed -n 's/^port: *//p' config/cli-proxy-api.yaml | head -1)
+REPO     := $(shell pwd)
+FORK     := https://github.com/groundnuty/CLIProxyAPI
+VERSION  := v7.2.110-plgrid.1
+SRC      := $(REPO)/.cli-proxy-api/src
+BIN      := $(REPO)/.cli-proxy-api/cli-proxy-api
+CONFIG   := $(REPO)/config/cli-proxy-api.local.yaml
+PORT     := $(shell sed -n 's/^port: *//p' config/cli-proxy-api.yaml | head -1)
 
-.PHONY: help proxy build config stop status logs test clean
+# Prebuilt binaries are published on the fork's releases; no Go toolchain needed.
+OS       := $(shell uname -s | tr A-Z a-z)
+ARCH     := $(shell uname -m | sed 's/^x86_64$$/amd64/; s/^aarch64$$/arm64/')
+TARBALL  := cli-proxy-api_$(VERSION)_$(OS)_$(ARCH).tar.gz
+URL      := $(FORK)/releases/download/$(VERSION)/$(TARBALL)
+
+.PHONY: help proxy build build-from-source config stop status logs test clean
 .DEFAULT_GOAL := help
 
 help:
 	@echo "make config   create config/cli-proxy-api.local.yaml, then add your PLGrid key"
-	@echo "make build    build the patched proxy from $(FORK)"
+	@echo "make build    download the patched proxy $(VERSION) ($(OS)/$(ARCH))"
+	@echo "make build-from-source   build it instead (needs Go 1.26)"
 	@echo "make proxy    start the proxy (builds and configures if needed)"
 	@echo "make status   check whether the proxy is up and which models it serves"
 	@echo "make stop     stop the proxy"
@@ -33,17 +41,31 @@ config: $(CONFIG)
 
 $(BIN):
 	@mkdir -p $(dir $(BIN))
-	@test -d $(SRC) || git clone --depth 1 $(FORK) $(SRC)
-	@cd $(SRC) && git pull --ff-only 2>/dev/null || true
-	@cd $(SRC) && go build -o $(BIN) ./cmd/server
-	@echo "built $(BIN)"
+	@echo "downloading $(TARBALL)"
+	@curl -fsSL -o $(dir $(BIN))/$(TARBALL) $(URL) || { \
+	  echo "download failed for $(OS)/$(ARCH) — falling back to a source build"; \
+	  $(MAKE) --no-print-directory build-from-source; exit $$?; }
+	@curl -fsSL -o $(dir $(BIN))/checksums.txt $(FORK)/releases/download/$(VERSION)/checksums.txt
+	@cd $(dir $(BIN)) && (shasum -a 256 -c --ignore-missing checksums.txt 2>/dev/null \
+	  || sha256sum -c --ignore-missing checksums.txt) | grep -q OK \
+	  && echo "checksum verified" || { echo "CHECKSUM MISMATCH — refusing to install"; exit 1; }
+	@tar xzf $(dir $(BIN))/$(TARBALL) -C $(dir $(BIN))
+	@chmod +x $(BIN) && rm -f $(dir $(BIN))/$(TARBALL)
+	@$(BIN) -version 2>&1 | head -1 || true
+
+build-from-source:
+	@mkdir -p $(dir $(BIN))
+	@test -d $(SRC) || git clone --depth 1 --branch $(VERSION) $(FORK) $(SRC)
+	@cd $(SRC) && CGO_ENABLED=0 go build -o $(BIN) ./cmd/server
+	@echo "built $(BIN) from source"
 
 build: $(BIN)
 
 proxy: $(BIN) $(CONFIG)
 	@grep -q PLGRID_API_KEY $(CONFIG) && { echo "error: put your key in $(CONFIG) first"; exit 1; } || true
-	@$(BIN) --config $(CONFIG) & echo $$! > .cli-proxy-api/pid
-	@sleep 3
+	@mkdir -p .cli-proxy-api
+	@nohup $(BIN) --config $(CONFIG) > .cli-proxy-api/proxy.log 2>&1 & echo $$! > .cli-proxy-api/pid
+	@sleep 4
 	@$(MAKE) --no-print-directory status
 
 status:
@@ -60,15 +82,22 @@ stop:
 	  && echo "stopped" || echo "not running"
 
 logs:
-	@tail -f $$(sed -n 's/^auth-dir: *"\(.*\)"/\1/p' $(CONFIG) | head -1)/logs/*.log 2>/dev/null \
-	  || echo "no request logs yet (request-log: true must be set)"
+	@tail -n 40 -f .cli-proxy-api/proxy.log 2>/dev/null \
+	  || echo "no proxy log yet — start it with: make proxy"
 
 test: status
 	@echo "sending a real completion through the proxy..."
-	@curl -fsS -m 120 -X POST http://127.0.0.1:$(PORT)/v1/messages \
+	@# max_tokens must leave room for a thinking block: reasoning models emit
+	@# thinking first, and a small budget is consumed before any answer text.
+	@curl -fsS -m 180 -X POST http://127.0.0.1:$(PORT)/v1/messages \
 	  -H "Authorization: Bearer local-test-key" -H 'content-type: application/json' \
-	  -d '{"model":"glm-5.2-fp8-393k","max_tokens":32,"messages":[{"role":"user","content":"Reply with exactly: PLGRID_OK"}]}' \
-	  | python3 -c "import json,sys;d=json.load(sys.stdin);t=''.join(b.get('text','') for b in d.get('content',[]));print('  response:',t.strip() or d);sys.exit(0 if 'PLGRID_OK' in t else 1)" \
+	  -d '{"model":"glm-5.2-fp8-393k","max_tokens":1024,"messages":[{"role":"user","content":"Reply with exactly: PLGRID_OK"}]}' \
+	  | python3 -c "import json,sys; d=json.load(sys.stdin); c=d.get('content',[]); \
+	    text=''.join(b.get('text','') for b in c if b.get('type')=='text'); \
+	    think=sum(len(b.get('thinking','')) for b in c if b.get('type')=='thinking'); \
+	    print('  reply   :', text.strip() or '(none)'); \
+	    print('  thinking:', f'{think} chars' if think else 'none (model or fix inactive)'); \
+	    sys.exit(0 if 'PLGRID_OK' in text else 1)" \
 	  && echo "END-TO-END OK"
 
 clean: stop

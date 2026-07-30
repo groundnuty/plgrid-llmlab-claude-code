@@ -11,7 +11,8 @@ subagents pinned to different models, auto-compaction, MCP, and `--resume`.
 
 ## Getting started
 
-**Prerequisites:** a PLGrid grant with LLMLab access, Go 1.26, Python 3, and Claude Code installed.
+**Prerequisites:** a PLGrid grant with LLMLab access, Python 3, and Claude Code installed.
+No Go toolchain needed — `make build` downloads a prebuilt, checksum-verified binary.
 
 ```bash
 git clone https://github.com/groundnuty/plgrid-llmlab-claude-code
@@ -21,7 +22,7 @@ make config        # creates config/cli-proxy-api.local.yaml (gitignored, mode 6
 $EDITOR config/cli-proxy-api.local.yaml    # replace PLGRID_API_KEY with your grant key
                    # get one at llmlab.plgrid.pl -> Grants -> Generate API Key
 
-make proxy         # builds the patched proxy and starts it
+make proxy         # downloads the patched proxy and starts it
 make test          # end-to-end check: expect PLGRID_OK
 ```
 
@@ -49,7 +50,8 @@ That is usage against the model's **real** context window, with a warning past 8
 | Target | Does |
 |---|---|
 | `make config` | create the local proxy config from the template |
-| `make build` | build the patched proxy from the fork |
+| `make build` | download the prebuilt proxy for your platform, checksum-verified |
+| `make build-from-source` | build it instead (needs Go 1.26) |
 | `make proxy` | start it (builds and configures if needed) |
 | `make status` | is it up, and which models does it serve |
 | `make test` | send a real completion end-to-end |
@@ -116,21 +118,23 @@ between `config/cli-proxy-api.yaml` and the settings files** — a mismatch give
 The proxy is built from [`groundnuty/CLIProxyAPI`](https://github.com/groundnuty/CLIProxyAPI), whose
 `main` carries both fixes. Neither is upstream yet.
 
-**The fork is tagged `v7.2.110-plgrid.1`** — upstream base plus our patch level, so provenance is
-obvious and rebasing on a new upstream release is a version bump.
+The fork is released as
+**[`v7.2.110-plgrid.1`](https://github.com/groundnuty/CLIProxyAPI/releases/tag/v7.2.110-plgrid.1)**
+with prebuilt binaries for `linux/amd64`, `linux/arm64`, `darwin/arm64` and `darwin/amd64`, plus
+`checksums.txt`. `make build` picks the right one for your platform, verifies its SHA-256, and falls
+back to a source build if no asset matches. Built `CGO_ENABLED=0 -trimpath`; the Linux binaries are
+statically linked.
 
-It inherits upstream's CI, which fires on any tag:
+The version scheme is upstream base plus our patch level, so rebasing on a new upstream release is a
+version bump.
 
-- `release.yaml` uses only `secrets.GITHUB_TOKEN`, which **is** available on forks — so it produces
-  a GitHub Release with prebuilt binaries, and `make build` could become a download.
-- `docker-image.yml` needs `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`, which a fork does **not**
-  inherit. That job will fail unless those secrets are added or it is repointed at `ghcr.io`, which
-  works with `GITHUB_TOKEN`.
-
-**One manual step remains:** GitHub disables Actions on forked repositories until a maintainer
-enables them once, in the fork's *Actions* tab. Until that click, the tag exists but no release is
-built — which is why `make build` currently compiles from source. After enabling, re-push the tag
-(`git tag -f v7.2.110-plgrid.1 && git push -f origin v7.2.110-plgrid.1`) to trigger the build.
+**Note on the fork's CI.** It inherits upstream's workflows, but GitHub disables Actions on forked
+repositories until a maintainer enables them once in the *Actions* tab — so this release was built
+and uploaded manually. If you enable Actions and re-push the tag, `release.yaml` will build it
+automatically (it needs only `GITHUB_TOKEN`). `docker-image.yml` will still fail without
+`DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`, which forks do not inherit; repointing it at `ghcr.io`
+would work with `GITHUB_TOKEN`. **There is currently no Docker image** — the binary is the
+supported path.
 
 The real exit is upstream. The reasoning-field fix in particular affects **any** vLLM-backed gateway,
 not just LLMLab, so it is worth a PR. Note
