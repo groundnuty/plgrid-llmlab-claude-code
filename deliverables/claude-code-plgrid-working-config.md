@@ -209,6 +209,67 @@ Caveat: one run per model on a trivial task. This establishes that the *transpor
 loop* work per model; it is not a capability benchmark. `glm-4.7-flash`'s failure was an
 arithmetic slip, not a protocol failure.
 
+## Interactive session test (tmux, GLM-5.2)
+
+`claude -p` exercises one code path. The interactive REPL adds streaming render, slash
+commands, hooks, and the permission layer, so it was tested separately: a tmux session driving
+real Claude Code 2.1.220 against `glm-5.2`, on a project with a genuine bug (a `median()` that
+returns the upper-middle element for even-length input, so 2 of 4 tests fail).
+
+**Startup.** Banner reads `glm-5.2 with xhigh effort · API Usage Billing`; status line shows
+`glm-5.2 xhigh`. Session hooks fired (`Async hook SessionStart completed`). Streaming render
+worked throughout, reporting 9–13k tok/s.
+
+**The task.** *"Run python3 run_tests.py, find why the failing tests fail, fix stats.py, then
+re-run to prove it passes."* GLM-5.2 then, unaided:
+
+1. `Bash(ls -la)` — listed the directory
+2. `Read(run_tests.py)`, `Read(stats.py)`
+3. traced all four cases by hand and stated the root cause correctly: *"it returned the
+   upper-middle element (s[n//2], which is s[2]=3) instead of averaging the two middle
+   elements ((s[1]+s[2])/2 = 2.5)"*
+4. `Update(stats.py)` with a correct fix:
+   ```python
+   mid = n // 2
+   if n % 2 == 1:
+       return s[mid]
+   return (s[mid - 1] + s[mid]) / 2
+   ```
+5. rendered a markdown results table summarising each case
+
+Verified independently afterwards: **4/4 tests pass.** The fix is correct.
+
+**Graceful degradation, worth noting.** Midway the Bash tool became unavailable — *"The Bash
+classifier is temporarily unavailable"*, then *"bash denied by auto mode · Classifier
+unavailable"*. This is an artifact of running Claude Code nested inside another Claude Code
+session, **not** a proxy or model failure. GLM-5.2 handled it well: it retried twice, then
+switched to static analysis, reached the right diagnosis without being able to execute
+anything, and still applied the correct patch. Sensible behaviour under tool loss.
+
+**Slash commands.** `/context` rendered a full breakdown (so the `count_tokens` path works
+end-to-end). `/model` listed both configured models — `glm-5.2 ✔ Custom model` and
+`gemma-4-31b Custom Haiku model`.
+
+### Two findings from the interactive test
+
+**1. Claude Code assumes a 200k context window, but PLGrid allows 393,216 for GLM-5.2.**
+`/context` and `/model` both report `31k/200k tokens (15%)`. Claude Code cannot know an
+unrecognized model's window — `ANTHROPIC_DEFAULT_*_MODEL_SUPPORTED_CAPABILITIES` has no effect
+behind an `ANTHROPIC_BASE_URL` gateway — so it falls back to 200k. **You lose roughly half your
+usable context by default.** To recover it, alias the model onto a Claude id whose registry
+entry carries a larger window (CLIProxyAPI supports aliasing upstream names onto Claude-shaped
+names), e.g. serve `zai-org/GLM-5.2-FP8` as `claude-sonnet-4-5` and set
+`ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-5[1m]`. That also happens to suppress the
+mid-conversation system block, though CLIProxyAPI already handles that. Untested here.
+
+**2. The `/model` picker still offers real Claude models, which will fail.** Alongside the two
+custom entries it lists *Opus (1M context)*, *Fable*, *Sonnet*, *Sonnet 5 (1M context)*.
+Selecting any of them sends e.g. `claude-opus-5` upstream, which PLGrid does not serve. A
+footgun for anyone sharing this setup — the picker gives no hint that four of six options are
+dead. Note this also **corrects a widely-reported claim**: the picker does *not* hide
+non-Claude model ids when they are configured via the `ANTHROPIC_DEFAULT_*_MODEL` env vars.
+That reported limitation applies to gateway model *discovery*, not to env-var configuration.
+
 ## Model notes for this gateway
 
 Measured limits from the OpenCode plugin (`.opencode/plugins/plgrid.js`), which took them from
