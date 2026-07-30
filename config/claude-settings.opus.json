@@ -7,6 +7,8 @@
       "Edit",
       "Write",
       "Task",
+      "Task(lab-coder)",
+      "Task(lab-reviewer)",
       "Bash(python3:*)",
       "Bash(echo:*)",
       "Bash(ls:*)",
@@ -22,6 +24,7 @@
     ]
   },
   "autoCompactEnabled": true,
+  "effortLevel": "xhigh",
   "statusLine": {
     "type": "command",
     "command": ".claude/statusline.sh",
@@ -34,7 +37,6 @@
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5-20251001",
-    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32768",
     "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
     "DISABLE_AUTOUPDATER": "1"
   }

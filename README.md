@@ -75,67 +75,84 @@ Two fixes are needed on top of the upstream release, both on our fork and both v
 See [`deliverables/plgrid-setup-reference.md`](deliverables/plgrid-setup-reference.md#required-fixes)
 for measurements and A/B evidence, and [Fork and releases](#fork-and-releases) below.
 
-## Hybrid: Anthropic driving, lab models doing the work
+## Opus orchestrating, lab models doing the work
 
-Run Opus or Fable as the main agent and delegate coding to LLMLab models as subagents.
+**The capability this repo exists for:** Claude Opus 5 at `xhigh` effort runs your session on your
+Claude subscription, and delegates implementation to GLM-5.2 and Qwen3.6 as **native Claude Code
+subagents** — real subagents with their own context and tools, not tool calls. No API key. No
+impersonation.
 
 ```bash
-cp config/cli-proxy-api.hybrid.yaml ~/.cli-proxy-api/config.yaml
-$EDITOR ~/.cli-proxy-api/config.yaml     # add BOTH keys: ANTHROPIC_API_KEY and PLGRID_API_KEY
+# once — OAuth against your subscription, token refreshes itself afterwards
+cp config/cli-proxy-api.opus.yaml ~/.cli-proxy-api/config.yaml
+$EDITOR ~/.cli-proxy-api/config.yaml          # add PLGRID_API_KEY only
+./cli-proxy-api --config ~/.cli-proxy-api/config.yaml --claude-login
+
 make proxy
-cd <project> && /path/to/repo/bin/claude-hybrid
+cd <project> && /path/to/repo/bin/claude-opus
 ```
 
-`claude-hybrid` also installs two subagents pinned to lab models: `lab-coder` (GLM-5.2, implements)
-and `lab-reviewer` (Qwen3.6-27B, checks correctness). Ask the main agent to use them by name.
+`claude-opus` installs two subagents pinned to lab models: **`lab-coder`** (GLM-5.2 — implementation)
+and **`lab-reviewer`** (Qwen3.6-27B — correctness review). Ask Opus to use them by name.
 
-### Where the split falls, and why
+Verified on the wire, one session:
 
-**The proxy owns transport. The client owns policy.** That line is forced, not chosen: Claude Code
-2.1.220 has no per-agent provider routing — no `agentBaseUrl`, `providerOverride` or `modelProvider`
-exists in the binary, and `ANTHROPIC_BASE_URL` is a single global. The extra base URLs that do exist
-(`ANTHROPIC_BEDROCK_BASE_URL`, `ANTHROPIC_VERTEX_BASE_URL`) select a *provider path*, not a model. So
-one endpoint must serve both, and only the proxy can route by model name.
+| Inbound | → Upstream | Role | Status |
+|---|---|---|---|
+| `claude-opus-5` | Anthropic (your subscription) | main | 200 |
+| `glm-5.2-fp8-393k` | `zai-org/GLM-5.2-FP8` | subagent | 200 |
+| `qwen3.6-27b-262k` | `Qwen/Qwen3.6-27B` | subagent | 200 |
 
-| Concern | Lives in | Why |
-|---|---|---|
-| Routing `claude-*` vs lab aliases | **proxy** | The only place it can live |
-| Keeping the two credentials apart | **proxy** | Each leg gets only its own key |
-| The `reasoning` and context-limit fixes | **proxy** | Wire-format differences; applied to the lab leg only |
-| Per-model request shimming (`payload` rules) | **proxy** | Depends on what each upstream accepts |
-| Which model drives the session | **client** | `ANTHROPIC_MODEL` |
-| Which subagent uses which model | **client** | Agent frontmatter `model:` |
-| Permissions, delegation policy | **client** | Orchestration, not transport |
+### Why the proxy is in the Anthropic path
 
-The rule of thumb: if it requires knowing **what the upstream speaks**, it belongs in the proxy; if
-it is **what you want to happen**, it belongs in the client. Resist putting policy in the proxy —
-model choice expressed as proxy config is invisible from inside the session, where you actually make
-the decision.
+Only because it has to be. Claude Code has no per-agent provider routing — verified against 2.1.220:
+no `agentBaseUrl`, `providerOverride` or `modelProvider` exists, agent frontmatter accepts no
+endpoint field, and `ANTHROPIC_BASE_URL` is a single global. So one endpoint must serve both
+providers and route by model name, and only the proxy can do that.
 
-Verified: one endpoint serving `claude-opus-5` and `claude-fable-5` alongside `glm-5.2-fp8-393k`,
-with `claude-opus-5` reaching the Anthropic leg and lab aliases reaching LLMLab, thinking blocks
-intact. The Anthropic leg was exercised against a **mock** upstream — routing and credential
-separation are proven, a live Anthropic key was not used.
+**This is not impersonation.** `disable-claude-cloak-mode: true` is set, which turns off
+CLIProxyAPI's Claude Code disguise and system-prompt replacement entirely. It is off because nothing
+needs disguising: the client genuinely *is* Claude Code. Measured, same proxy, minutes apart —
+`curl` through it gets `429`, Claude Code through it gets `200`.
 
-### Two things to get right
+### This proxy must stay local and single-user
 
-**Use an Anthropic API key, not a subscription.** The hybrid config sets
-`disable-claude-cloak-mode: true`. CLIProxyAPI can disguise traffic as Claude Code, which is what
-makes subscription credentials work through a proxy — that is outside Anthropic's terms and the
-config turns it off. Get a pay-per-token key from `console.anthropic.com`. The lab models are the
-cheap part; the Anthropic main agent is what you pay for.
+`auth-dir` stores an `access_token` **and a `refresh_token`** in plaintext at mode `0644`, and
+credentials are pooled **round-robin** across every logged-in account. On a shared host, other users
+could read the token file, and requests could be served by someone else's subscription. A
+lab-operated shared proxy is fine for the LLMLab leg — that is a lab-issued grant key — but must
+never hold subscription tokens.
 
-**`CLAUDE_CODE_MAX_CONTEXT_TOKENS` is deliberately unset here.** It is process-wide, so any value is
-wrong for one side: set it to the lab window and you cap Opus; set it to Opus's and lab models
-overflow. Leaving it unset gives Anthropic models their true registry windows and lab models a
-conservative 200k default. Under-using lab context is safe; over-declaring is what breaks. The
-proxy's context-limit fix still catches anything that slips through.
+### Known limitation: Opus reports a 200k window
+
+Behind any gateway, Claude Code cannot resolve registry context windows, so Opus shows **200k**
+instead of its true 1M. There is no fix. Exhaustively checked:
+
+| Mechanism | Per-model? |
+|---|---|
+| Model registry | hardcoded — two literals |
+| Gateway `/v1/models` | **no window field in the schema** |
+| Bootstrap `auto_compact_windows` | exists, first-party only — **tested, never requested behind a proxy** |
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | process-wide only |
+| Agent frontmatter | no window field |
+
+`auto_compact_windows` is a genuine model→window map inside Claude Code — exactly the right
+mechanism — but it ships only over the first-party bootstrap endpoint, which is skipped for gateway
+sessions and requires a first-party credential the client does not have behind a proxy.
+
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` is therefore deliberately **unset** in this profile: it is
+process-wide, so any value is wrong for one side. The 200k default is **provably safe** — it sits
+below the smallest real window in the catalogue (`glm-4.7-flash`, 202,752), so no model can overflow.
+
+In practice this profile spends its context orchestrating and delegating rather than reading, so
+200k rarely binds. If you want full context on a lab model, use `bin/claude-glm` or `bin/claude-qwen`,
+which set the exact window per profile.
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `bin/` | `claude-glm`, `claude-qwen`, `claude-hybrid` — launch with a model profile |
+| `bin/` | `claude-opus`, `claude-glm`, `claude-qwen` — launch with a model profile |
 | `config/` | proxy configs, per-profile Claude Code settings, status line, lab subagents |
 | `Makefile` | proxy lifecycle |
 | `deliverables/` | the reference manual, gateway performance report, investigation record |
