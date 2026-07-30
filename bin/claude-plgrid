@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Launch Claude Code against PLGrid LLMLab.
-#   claude-plgrid glm  [args...]   GLM-5.2-FP8 primary   (393k window)
-#   claude-plgrid qwen [args...]   Qwen3.6-27B primary   (262k window)
+#   claude-plgrid glm    [args...]  GLM-5.2-FP8 primary   (393k window)
+#   claude-plgrid qwen   [args...]  Qwen3.6-27B primary   (262k window)
+#   claude-plgrid hybrid [args...]  Anthropic primary, lab models as subagents
 # Any extra arguments are passed through to `claude`.
 set -euo pipefail
 
@@ -9,17 +10,21 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Profile comes from the invoked name (claude-glm / claude-qwen) or the first argument.
 case "$(basename "$0")" in
-  claude-glm)  PROFILE=glm ;;
-  claude-qwen) PROFILE=qwen ;;
+  claude-glm)    PROFILE=glm ;;
+  claude-qwen)   PROFILE=qwen ;;
+  claude-hybrid) PROFILE=hybrid ;;
   *)           PROFILE="${1:-glm}"; shift || true ;;
 esac
 
 case "$PROFILE" in
   glm)  SETTINGS="$REPO/config/claude-settings.glm.json" ;;
   qwen) SETTINGS="$REPO/config/claude-settings.qwen.json" ;;
+  hybrid)
+        SETTINGS="$REPO/config/claude-settings.hybrid.json"
+        AGENTS="$REPO/config/agents" ;;
   -h|--help|help)
         sed -n '2,5p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-  *)    echo "unknown profile '$PROFILE' (expected: glm | qwen)" >&2; exit 2 ;;
+  *)    echo "unknown profile '$PROFILE' (expected: glm | qwen | hybrid)" >&2; exit 2 ;;
 esac
 
 PORT="$(sed -n 's/^port: *//p' "$REPO/config/cli-proxy-api.yaml" | head -1)"
@@ -47,6 +52,15 @@ fi
 # Install project config on first use; never clobber an existing one.
 mkdir -p .claude
 [ -f .claude/statusline.sh ] || { cp "$REPO/config/statusline.sh" .claude/statusline.sh; chmod +x .claude/statusline.sh; }
+
+# Hybrid ships subagents pinned to lab models; install any that are missing.
+if [ -n "${AGENTS:-}" ] && [ -d "$AGENTS" ]; then
+  mkdir -p .claude/agents
+  for a in "$AGENTS"/*.md; do
+    [ -e "$a" ] || continue
+    [ -f ".claude/agents/$(basename "$a")" ] || { cp "$a" .claude/agents/; echo "installed agent $(basename "$a" .md)"; }
+  done
+fi
 
 if [ ! -f .claude/settings.json ]; then
   cp "$SETTINGS" .claude/settings.json

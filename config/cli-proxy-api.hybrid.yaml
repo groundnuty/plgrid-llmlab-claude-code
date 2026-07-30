@@ -1,0 +1,56 @@
+# Hybrid: Anthropic models AND PLGrid LLMLab models through one endpoint.
+#
+# Claude Code has no per-agent provider routing (verified against 2.1.220: no
+# agentBaseUrl / providerOverride / modelProvider in the binary), and
+# ANTHROPIC_BASE_URL is a single global. So routing by model name must happen
+# here, in the proxy.
+#
+# Use with config/claude-settings.hybrid.json.
+host: "127.0.0.1"
+port: 8317
+auth-dir: "~/.cli-proxy-api"
+request-log: true
+disable-cooling: true
+
+# IMPORTANT: no impersonation. CLIProxyAPI can "cloak" traffic to look like
+# Claude Code; that feature exists to make subscription credentials work
+# through a proxy. Use a real Anthropic API key instead and turn it off.
+disable-claude-cloak-mode: true
+
+api-keys:
+  - "local-test-key"
+
+# Leg 1 — Anthropic. Requires a pay-per-token API key from console.anthropic.com.
+# Do NOT put a Claude subscription OAuth token here: routing subscription
+# credentials through a third-party proxy is against Anthropic's terms.
+claude-api-key:
+  - api-key: "ANTHROPIC_API_KEY"
+
+# Leg 2 — PLGrid LLMLab.
+openai-compatibility:
+  - name: "plgrid"
+    base-url: "https://llmlab.plgrid.pl/api/v1"
+    api-key-entries:
+      - api-key: "PLGRID_API_KEY"
+    models:
+      - name: "zai-org/GLM-5.2-FP8"
+        alias: "glm-5.2-fp8-393k"
+      - name: "Qwen/Qwen3.6-27B"
+        alias: "qwen3.6-27b-262k"
+      - name: "Qwen/Qwen3.6-35B-A3B"
+        alias: "qwen3.6-35b-a3b-262k"
+      - name: "google/gemma-4-31B"
+        alias: "gemma-4-31b-262k"
+      - name: "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+        alias: "qwen3-coder-30b-249k"
+      - name: "Qwen/Qwen3-VL-8B-Instruct"
+        alias: "qwen3-vl-8b-262k"
+
+# Applies only to the OpenAI leg; the Anthropic leg is untouched passthrough.
+payload:
+  filter:
+    - models:
+        - name: "*"
+          protocol: "openai"
+      params:
+        - "reasoning_effort"
