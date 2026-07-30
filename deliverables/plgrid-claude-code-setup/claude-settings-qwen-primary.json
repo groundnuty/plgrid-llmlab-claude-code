@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat:*)",
+      "Bash(echo:*)",
+      "Bash(git diff:*)",
+      "Bash(git status)",
+      "Bash(ls:*)",
+      "Bash(pytest:*)",
+      "Bash(python3:*)",
+      "Edit",
+      "Glob",
+      "Grep",
+      "Read",
+      "Task",
+      "Write"
+    ],
+    "deny": [
+      "Bash(rm:*)",
+      "Bash(git push:*)",
+      "Bash(curl:*)"
+    ]
+  },
+  "autoCompactEnabled": true,
+  "statusLine": {
+    "type": "command",
+    "command": ".claude/statusline.sh",
+    "padding": 0
+  },
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8317",
+    "ANTHROPIC_AUTH_TOKEN": "local-test-key",
+    "ANTHROPIC_MODEL": "qwen3.6-27b-262k",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen3.6-27b-262k",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen3.6-27b-262k",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "qwen3.6-27b-262k",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32768",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "DISABLE_AUTOUPDATER": "1",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "262144"
+  }
+}

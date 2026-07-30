@@ -40,6 +40,9 @@ openai-compatibility:
         alias: "qwen3.6-35b-a3b-262k"
       - name: "Qwen/Qwen3-Coder-30B-A3B-Instruct"
         alias: "qwen3-coder-30b-249k"
+      # vision-capable; route image work here since GLM-5.2 is not multimodal
+      - name: "Qwen/Qwen3-VL-8B-Instruct"
+        alias: "qwen3-vl-8b-262k"
 
 # MANDATORY. PLGrid validates with extra_forbidden and rejects reasoning_effort,
 # which CLIProxyAPI sends for reasoning-capable models. Without this, every

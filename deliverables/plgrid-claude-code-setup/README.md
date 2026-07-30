@@ -1,412 +1,255 @@
-# Claude Code on PLGrid Forge — runnable setup
+# Claude Code on PLGrid Forge
 
-Everything needed to point the Claude Code CLI at PLGrid Forge (ACK Cyfronet) models.
-Findings and evidence behind each choice: `../claude-code-plgrid-working-config.md`.
+Run the Claude Code CLI against PLGrid Forge (ACK Cyfronet) models. Verified end-to-end on
+2026-07-30 with Claude Code **2.1.220** and CLIProxyAPI **7.2.110** plus two local fixes.
 
-Verified 2026-07-30 with Claude Code **2.1.220** and CLIProxyAPI **7.2.110**.
+Files here: `cli-proxy-api.config.yaml` (proxy), `claude-settings.json` (project settings,
+GLM-5.2 primary), `claude-settings-qwen-primary.json` (same with Qwen3.6-27B primary),
+`statusline.sh` (context display). Investigation history and evidence:
+`../claude-code-plgrid-working-config.md`. Gateway performance notes for the operators:
+`../plgrid-forge-observed-performance.md`.
+
+---
+
+## Why a proxy is needed
+
+PLGrid Forge is a hosted OpenAI-compatible gateway. Probed directly:
+
+| Endpoint | Result |
+|---|---|
+| `POST /api/v1/chat/completions` | **200** |
+| `POST /api/v1/messages` (Anthropic) | 404 |
+| `POST /api/v1/responses` (OpenAI Responses) | 404 |
+
+Claude Code speaks Anthropic dialect only, so translation is mandatory. Because `/responses` is
+absent, **LiteLLM and Bifrost fail out of the box** — both default the Anthropic path to the
+upstream's Responses API. CLIProxyAPI targets `/chat/completions` directly, which is why it is the
+right tool here.
 
 ## Install
 
 ```bash
-# 1. Proxy binary (stock release; no build needed for the base setup)
-brew install cliproxyapi          # or: download the release for your platform
+# 1. Proxy, built from the fork — main carries both required fixes (needs Go 1.26)
+git clone https://github.com/groundnuty/CLIProxyAPI && cd CLIProxyAPI
+go build -o cli-proxy-api ./cmd/server
 
-# 2. Config, with your grant key
-cp cli-proxy-api.config.yaml ~/.cli-proxy-api/config.yaml
-$EDITOR ~/.cli-proxy-api/config.yaml     # replace PLGRID_API_KEY
-chmod 600 ~/.cli-proxy-api/config.yaml   # it holds a secret
+# 2. Config, with your grant key from llmlab.plgrid.pl -> Grants -> Generate API Key
+mkdir -p ~/.cli-proxy-api
+cp <this-dir>/cli-proxy-api.config.yaml ~/.cli-proxy-api/config.yaml
+$EDITOR ~/.cli-proxy-api/config.yaml          # replace PLGRID_API_KEY
+chmod 600 ~/.cli-proxy-api/config.yaml        # it holds a secret
 
 # 3. Per-project Claude Code config
-mkdir -p <your-project>/.claude
-cp claude-settings.json <your-project>/.claude/settings.json
-cp statusline.sh        <your-project>/.claude/statusline.sh
-chmod +x               <your-project>/.claude/statusline.sh
+mkdir -p <project>/.claude
+cp <this-dir>/claude-settings.json <project>/.claude/settings.json
+cp <this-dir>/statusline.sh        <project>/.claude/statusline.sh
+chmod +x                           <project>/.claude/statusline.sh
 
 # 4. Run
-cli-proxy-api --config ~/.cli-proxy-api/config.yaml     # leave running
-cd <your-project> && claude                              # accept the trust prompt once
+./cli-proxy-api --config ~/.cli-proxy-api/config.yaml    # leave running
+cd <project> && claude                                   # accept the trust prompt once
 ```
 
-Nothing goes in `~/.claude/settings.json`. Every setting here is project-scoped on purpose —
-these choices are specific to this gateway and should not follow you into other projects.
+Everything is project-scoped deliberately. **Nothing belongs in `~/.claude/settings.json`** — these
+choices are specific to this gateway and should not follow you into unrelated projects.
+
+The stock 7.2.110 release works for everything **except** automatic context-limit handling and
+reasoning/thinking blocks. Both need the fork; see [Required fixes](#required-fixes).
 
 ## What you get
 
 ```
-glm-5.2-fp8-393k[1m] · 36.1k/393k █░░░░░░░░░░░░░░░░░░░ 9% · $0.18
+glm-5.2-fp8-393k · 36.1k/393k █░░░░░░░░░░░░░░░░░░░ 9% · $0.18
 ```
 
-Usage against the model's **real** limit. Claude Code's own indicator would read 4% here, because
-every model deliberately declares a 1M window (see below); the status line reads the true limit out
-of the `-393k` segment in the model id. At 80% it appends `⚠ COMPACT SOON`.
+Usage against the model's real window, with `⚠ COMPACT SOON` past 80%. Switching model with
+`/model` picks up that model's limit automatically, because it is encoded in the alias.
 
-Switching model with `/model` picks up that model's encoded limit automatically, and subagents
-pinned to other models are shown correctly too, because the limit travels in the name.
+## Context windows
 
-## The three settings that are not optional
+**`CLAUDE_CODE_MAX_CONTEXT_TOKENS` sets the believed window to any value.** It is undocumented but
+functional in 2.1.220. Measured, same model id, only the variable changed:
 
-Each of these was found the hard way; without them the setup fails in ways that are hard to
-diagnose.
-
-| Setting | Where | Why |
+| Setting | Status line | Believed window |
 |---|---|---|
-| `payload.filter` on `reasoning_effort` | proxy config | PLGrid validates with `extra_forbidden`. Without it every request dies with a bare `422`. |
-| `disable-cooling: true` | proxy config | Cooldown is per (auth, model). With one credential, any failure blacks out that model for ~60s with `503`, so a compaction retry hits the model it needs. |
-| `CLAUDE_CODE_ATTRIBUTION_HEADER: "0"` | project settings | Claude Code prepends a per-request hash to the system prompt, so the KV prefix misses every turn. Unsloth measures the cost as "90% slower with local models". |
+| unset | 13.0% | ~206k |
+| `262144` | 10.0% | ~269k |
+| `393216` | 7.0% | ~396k |
 
-## The context window: set it exactly, per model
+With a truthful window everything downstream is simply correct: `/context` is accurate,
+auto-compaction fires at the right point with no `CLAUDE_CODE_AUTO_COMPACT_WINDOW` override (the
+documented clamp is "at most the model's context window"), and model ids stay honest.
 
-**`CLAUDE_CODE_MAX_CONTEXT_TOKENS` sets the believed context window to any arbitrary value.** It is
-undocumented — absent from the model-configuration docs — but present and functional in 2.1.220.
-Measured, same bare model id, only the variable changed:
+**The variable is process-wide, so set it to the smallest window in the session** — a subagent on a
+smaller model is the binding constraint:
 
-| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | Tokens | Status line | Believed window |
-|---|---|---|---|
-| unset | 26,836 | 13.0% | ~206k |
-| `262144` | 26,931 | 10.0% | **~269k** |
-| `393216` | 27,699 | 7.0% | **~396k** |
+| Session | Set to |
+|---|---|
+| GLM-5.2 only | `393216` |
+| GLM-5.2 + Qwen or gemma subagent | `262144` |
+| any session including GLM-4.7-Flash | `202752` |
 
-This is the clean solution and it **supersedes the `[1m]` approach** described in earlier revisions of
-this document. Set the model's real window and everything downstream is simply correct:
+A larger model added later does not raise the floor. Set it too high for any participating model and
+that model overflows — which is what the context-limit fix catches.
 
-- Claude Code's own percentage is accurate, so `/context` and the built-in indicator can be trusted.
-- Auto-compaction fires at the right point with no `CLAUDE_CODE_AUTO_COMPACT_WINDOW` override, because
-  the documented clamp is "at most the model's context window" and the window is now truthful.
-- No fictional 1M declaration, so no overshoot risk and no need to cap the trigger by hand.
-- Honest model ids in the picker and status line, with no `[1m]` suffix.
+**Compaction runs on the haiku tier and must fit the whole conversation in one request.** Point
+haiku at a model with a smaller real window than the primary and large conversations become
+unsummarisable. The settings file points all four tiers at one model to avoid this. If you do split
+them, cap `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the smaller model's window.
 
-Earlier revisions concluded that per-model windows were impossible because the client hardcodes only
-200,000 and 1,000,000. That conclusion was **wrong** — it held for the model registry and for
-gateway discovery (`max_input_tokens` is parsed but ignored), but this variable overrides the result
-regardless.
-
-### The remaining limitation, and it is real
-
-The variable is **process-wide**, so it cannot differ between the main agent and its subagents. With a
-mixed-model session you must set it to the **smallest** real window in use:
-
-| Session | Set to | Why |
-|---|---|---|
-| GLM-5.2 only | `393216` | its real window |
-| GLM-5.2 + Qwen3.6-27B subagent | `262144` | Qwen's window is the binding constraint |
-| plus GLM-4.7-Flash | `202752` | smallest wins |
-| plus Kimi K3 (1M) later | still smallest | a larger model does not raise the floor |
-
-Set it too high for any participating model and that model overflows. This is where the proxy's
-reactive error normalisation still earns its place: it catches whatever the floor fails to prevent,
-using the real limit from the model that actually overflowed.
-
-## Model notes
+## Models
 
 | Alias | Real window | Notes |
 |---|---|---|
-| `glm-5.2-fp8-393k` | 393,216 | Best default: fastest **and** correct in testing (11s) |
+| `glm-5.2-fp8-393k` | 393,216 | **Best default.** Fastest and correct (11s). Not multimodal. |
 | `qwen3.6-35b-a3b-262k` | 262,144 | Correct, 14s |
-| `gemma-4-31b-262k` | 262,144 | Correct, 16s |
+| `gemma-4-31b-262k` | 262,144 | Correct, 16s. Handles images. |
 | `qwen3-coder-30b-249k` | 249,600 | Correct, 28s |
-| `qwen3.6-27b-262k` | 262,144 | Correct but slow, 50s — good for a reviewer subagent |
-| `glm-4.7-flash-202k` | 202,752 | **Avoid.** Completed the loop but returned a confidently wrong answer |
+| `qwen3.6-27b-262k` | 262,144 | Correct but 50s. Best coding benchmarks — good reviewer subagent. |
+| `glm-4.7-flash-202k` | 202,752 | **Avoid.** Returned a confidently wrong answer. |
+
+Both `glm-5.2-fp8-393k` (primary, Qwen/gemma subagents) and `qwen3.6-27b-262k` (primary, GLM/gemma
+subagents) are verified working as the main model — use `claude-settings.json` or
+`claude-settings-qwen-primary.json` respectively. `qwen3-vl-8b-262k` is also in the proxy config for
+image work, since GLM-5.2 is not multimodal.
+
+Note the Qwen-primary variant sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS: "262144"`, not 393216, even
+though its GLM subagent has a larger window: the variable is process-wide and the **smallest**
+participating window governs. Verified — the status line correctly read `262k`.
 
 Grant 94 cannot reach `Qwen3.5-397B`, `Qwen3.5-122B` or `DeepSeek-V4-Flash` despite `GET /models`
-listing them. No Moonshot/Kimi models present as of 2026-07-30.
+listing them — enumeration is not entitlement. No Moonshot/Kimi models present as of 2026-07-30.
 
-**Keep the compaction model equal to the primary.** Compaction runs on the haiku tier, so if it
-points at a model whose real window is smaller than the primary's, large conversations cannot be
-summarised — the compaction request itself overflows. The settings file therefore points all four
-tiers at the same model. If summarisation cost matters more than context length, instead set haiku
-to `gemma-4-31b-262k` **and** add `"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "250000"` so the effective
-window is the smaller of the two. Do not mix the two approaches.
+**A model needs roughly ≥64k real context to work in Claude Code at all.** The client's irreducible
+baseline is ~19k (1.6k system prompt + 15.8k tool definitions + 1.5k skills) even with one tool and
+no MCP, and compaction shrinks only conversation history. Bielik-11B at 32k is not viable. Every
+model above clears this comfortably.
 
-## Optional: automatic limit handling
+## Settings that are not optional
 
-With the stock proxy, exceeding a model's real window produces a raw upstream error and the session
-stops. Claude Code only recovers when the message matches
-`prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)`, which PLGrid's wording does not.
+Each was found by failing first.
 
-A patch that restates the upstream error in that form is on a **fork branch, unmerged, with no PR
-opened**: `groundnuty/CLIProxyAPI@fix/normalize-vllm-context-limit-errors`. Using it needs a source
-build (Go 1.26):
+| Setting | Where | Why |
+|---|---|---|
+| `payload.filter` on `reasoning_effort` | proxy | PLGrid validates with `extra_forbidden`; every request otherwise dies with a bare `422`. Applies to **all** models, not just GLM. |
+| `disable-cooling: true` | proxy | Cooldown is per (auth, model). With one credential any failure blacks out that model for ~60s with `503`, so a compaction retry hits the model it needs. |
+| `CLAUDE_CODE_ATTRIBUTION_HEADER: "0"` | project | A per-request hash in the system prompt makes the KV prefix miss every turn. Unsloth measures "90% slower with local models". |
+| `CLAUDE_CODE_MAX_OUTPUT_TOKENS: "32768"` | project | PLGrid caps output at 32768 and enforces `input + max_tokens <= context`. Claude Code otherwise sends 128000. |
 
-```bash
-git clone https://github.com/groundnuty/CLIProxyAPI && cd CLIProxyAPI   # main has both fixes
-go build -o cli-proxy-api ./cmd/server                                  # needs Go 1.26
-```
+## Subagents on different models
 
-**Both fixes are merged into `main` on that fork** (`groundnuty/CLIProxyAPI`), so `main` is the stable
-branch — no branch-picking or merging needed. Neither fix is upstream yet and no PR is open. The
-reasoning-field fix matters for every reasoning model and is the more important of the two.
-
-Verified A/B on the same oversized request: stock leaks `API Error: 400 {"detail": …}`; patched
-emits `prompt is too long: 66511 tokens > 32768 maximum (…)`, which the client recognises.
-
-**Not yet observed:** a long session actually recovering by compaction. The code path is confirmed
-and its "cannot compact" branch was seen firing correctly, but no multi-turn recovery has been
-watched end to end. Treat automatic recovery as expected-but-unproven.
-
-## R3 — behaviour at the context limit: PASSES
-
-### Auto-compaction fires and recovers (GLM-5.2, real headroom)
-
-Tested on `glm-5.2-fp8-393k[1m]` (real window 393,216) with the trigger set low
-(`CLAUDE_CODE_AUTO_COMPACT_WINDOW: "110000"`) so there was both ample history to summarise and
-ample headroom for the summarising request itself. Context was filled by reading ~89KB data files
-one at a time.
-
-Observed, in order:
-
-```
-3% until auto-compact                 <- client counts down against the trigger
-✽ Compacting conversation… (9s)       <- fires automatically
-0.0k/393k ░░░░░░░░░░░ 0%             <- context reclaimed
-65.0k/393k ███░░░░░░░░ 17%           <- session continues normally afterwards
-```
-
-A follow-up prompt after compaction was answered normally. **Auto-compaction works end to end on a
-model with adequate context.** This is the requirement, and it is met.
-
-### The failure mode on small-window models, and the floor it implies
-
-The same test on Bielik-11B (real window 32,768) produced Claude Code's own clean message —
-`Context limit reached · /compact or /clear to continue` rather than raw upstream JSON, which is
-what the error-normalisation patch buys — but recovery failed, and manual `/compact` also failed
-with `conversation could not be reduced below the context limit`.
-
-That is correct behaviour, not a defect. **Claude Code's baseline does not fit in a small window.**
-Measured with only the `Read` tool, a fresh config dir, and no MCP:
-
-| Component | Tokens |
-|---|---|
-| System prompt | 1.6k |
-| System tools | 15.8k |
-| Skills | 1.5k |
-| **Irreducible baseline** | **~19k** |
-
-Compaction shrinks conversation history only; system prompt, tool definitions and skills are
-re-sent every turn and survive it. On a 32k model ~19k is unreclaimable, leaving under 14k to work
-with.
-
-**Implication: a model needs roughly ≥64k real context to work in Claude Code at all**, and more
-for real tasks. Every model in the table above (202k minimum) clears this comfortably. Bielik-11B
-is not viable as a Claude Code model at any proxy setting.
-
-## R4 — one model driving, two subagents on different models: PASSES
-
-Primary `glm-5.2-fp8-393k[1m]`, with two subagents pinned by frontmatter, each auditing a
-different file containing a different real bug:
+Works, verified on the wire in both directions. Pin by frontmatter:
 
 ```markdown
 ---
-name: parser-auditor
+name: reviewer
+description: Reviews code for correctness. Use after changes.
 model: qwen3.6-27b-262k
-tools: Read
+tools: Read, Glob, Grep
 ---
 ```
 
-Both bugs were found and correctly diagnosed — the exclusive upper bound in `range(int(lo), int(hi))`
-and the integer division in `sum(xs) // len(xs)`. Wire-level routing from the proxy log:
+Two prerequisites:
 
-| Inbound alias | → Upstream model | Agent id | Status |
-|---|---|---|---|
-| `glm-5.2-fp8-393k` | `zai-org/GLM-5.2-FP8` | MAIN | 200 |
-| `qwen3.6-27b-262k` | `Qwen/Qwen3.6-27B` | `3609017b` | 200 |
-| `gemma-4-31b-262k` | `google/gemma-4-31B` | `12bee177` | 200 |
+- **Allow-list the `Task` tool** — `"Task"`, or `"Task(<agent-name>)"` per agent — or dispatch is
+  refused.
+- **Launch with `--permission-mode acceptEdits`** (or `default`). Auto mode's classifier is
+  unavailable for these models and dispatch fails with `denied by auto mode · Classifier
+  unavailable`. This is **not** `--dangerously-skip-permissions`.
 
-Three models, three distinct upstreams, one session, with per-agent ids for attribution.
-
-**Two prerequisites, both learned by failing first.** The `Task` tool must be allow-listed
-(`"Task"`, or `"Task(<agent-name>)"` per agent) or dispatch is refused. And auto mode's classifier
-is unavailable for these models, so launch with `--permission-mode acceptEdits` (or `default`);
-otherwise subagent dispatch fails with `parser-auditor denied by auto mode · Classifier
-unavailable`. Neither needs `--dangerously-skip-permissions`.
-
-**The first R4 attempt failed for an instructive reason:** every subagent request returned `502
-unknown provider for model qwen3.6-27b-262k`, because the running proxy had been configured with
-the bare alias `qwen3.6-27b` while the settings referenced `qwen3.6-27b-262k`. The aliases in the
-proxy config and in `ANTHROPIC_DEFAULT_*` / agent frontmatter must match exactly. Check with:
+**Aliases must match exactly** between the proxy config and `ANTHROPIC_DEFAULT_*` / agent
+frontmatter. A mismatch gives `502 unknown provider for model …`. Check with:
 
 ```bash
 curl -s -H "Authorization: Bearer local-test-key" http://127.0.0.1:8317/v1/models | jq -r '.data[].id'
 ```
 
-## Compaction model sizing — important
+## Autonomous operation
 
-**The model that performs compaction must have a context window at least as large as the model
-being compacted.** Compaction runs on the haiku tier and must fit the entire conversation in one
-request in order to summarise it. Point haiku at a smaller-window model and large conversations
-become unsummarisable: the compaction request itself overflows, and you get
-`Compaction failed · conversation could not be reduced below the context limit`.
+Auto mode is unavailable for these models — the banner says so and falls back to manual. **You do
+not need `--dangerously-skip-permissions`.** `permissions.allow` is deterministic pre-approval with
+no classifier, so it is model-independent.
 
-Anthropic's docs state the principle — Claude Code "won't fall back to a model with a smaller
-context window than the primary's, since summarizing there would cut off part of the conversation
-first" — but **that guard cannot help here**, because under the declare-`[1m]`-everywhere scheme
-the client believes every model has 1M and cannot see the real difference. The guard silently
-never engages.
+The gotcha: **rules match per command segment**, so a compound command needs every segment allowed.
+GLM-5.2 habitually appends `; echo "exit: $?"`, which defeats `Bash(python3:*)` alone — hence
+`Bash(echo:*)` in the settings file. Choosing "don't ask again" writes a *literal* rule to
+`.claude/settings.local.json`, so pre-declaring patterns is better.
 
-So the rule must be enforced by hand:
+**The trust dialog has no flag or env var.** It is per-project state in the global `~/.claude.json`
+under `projects["<abs-path>"].hasTrustDialogAccepted`. Until accepted, `permissions.allow` is
+ignored entirely — `Ignoring N permissions.allow entries … this workspace has not been trusted` —
+which matters for unattended first runs.
 
-- **Safe:** haiku = the primary model (what `claude-settings.json` does).
-- **Safe:** haiku = a smaller model **and** `CLAUDE_CODE_AUTO_COMPACT_WINDOW` capped to that
-  smaller model's real window.
-- **Broken:** haiku = a smaller model with no cap. Works until the conversation exceeds the haiku
-  model's window, then compaction fails permanently and the session cannot be recovered.
+## Required fixes
 
-## No flag disables the trust dialog
+Two fixes, both merged into `main` on `groundnuty/CLIProxyAPI`, both verified against PLGrid,
+**neither upstream yet and no PR open**.
 
-There is no CLI flag or environment variable. It is per-project state in **`~/.claude.json`** under
-`projects["<absolute-path>"].hasTrustDialogAccepted`. Setting it to `true` for a path pre-accepts
-that project. Relevant strings in the 2.1.220 binary are `hasTrustDialogAccepted` and
-`hasCompletedOnboarding`; there is no `CLAUDE_CODE_TRUST_ALL`, `bypassTrustDialog`, or
-`--dangerously-skip-trust`.
+### 1. Reasoning/thinking blocks were being discarded
 
-Note this is a **global** file, so pre-accepting projects is a machine-level edit, not something
-that can ship in a project's `.claude/settings.json`. Also note that `permissions.allow` entries in
-project settings are **ignored until the dialog is accepted** — observed verbatim:
-`Ignoring 4 permissions.allow entries from .claude/settings.json: this workspace has not been
-trusted.` So for unattended first runs, the trust state has to be seeded in advance.
-
-## Untested
-
-Images, MCP tools, manual `/compact`, `--resume`, and `availableModels` with these non-`claude`
-ids. Subagent routing to different models **is** verified.
-
-## Model choice — and a caution about blaming the model
-
-Research summary: `../../research/plgrid-model-selection-for-agentic-coding.md`.
-
-**Recommended:** `glm-5.2-fp8-393k` as primary — the only candidate with published tool-use numbers
-(MCP-Atlas 76.8, Tool-Decathlon 48.2, against 62.8 / 26.9 for Qwen3.6-35B-A3B) and fastest-and-correct
-in local testing. `qwen3.6-27b-262k` as reviewer subagent — best coding numbers available
-(SWE-bench Verified 77.2 vs 73.4 for the A3B MoE, Terminal-Bench 2.0 59.3 vs 51.5), and its 50s
-latency is irrelevant for a review pass. **Avoid** `glm-4.7-flash-202k`: it returned a wrong answer
-here, and publishes no tool-use benchmark at all.
-
-**Root cause found: the proxy was discarding every model's chain of thought.** An earlier revision
-blamed [claude-code-router #1400](https://github.com/musistudio/claude-code-router/issues/1400) — a
-misapplied citation, since that is a different proxy and is not installed here. The real defect was in
-CLIProxyAPI, and it is now fixed and measured.
-
-The OpenAI-to-Claude response translator read reasoning only from `reasoning_content`. vLLM's
-OpenAI-compatible server emits **`reasoning`** instead, matching the OpenAI Responses API. Measured
-streaming delta chunks from PLGrid for one short prompt:
+The response translator read reasoning only from `reasoning_content`. vLLM emits **`reasoning`**,
+matching the OpenAI Responses API. Measured streaming chunks for one prompt:
 
 | Model | `reasoning` | `reasoning_content` |
 |---|---|---|
-| `zai-org/GLM-5.2-FP8` | **42** | **0** |
-| `Qwen/Qwen3.6-27B` | **120** | **0** |
-| `Qwen/Qwen3.6-35B-A3B` | **120** | **0** |
-| `zai-org/GLM-4.7-Flash` | 81 | 81 (both) |
-| `Qwen/Qwen3-Coder-30B` | 0 | 0 (non-reasoning) |
-| `google/gemma-4-31B` | 0 | 0 (non-reasoning) |
+| GLM-5.2-FP8 | **42** | **0** |
+| Qwen3.6-27B | **120** | **0** |
+| Qwen3.6-35B-A3B | **120** | **0** |
+| GLM-4.7-Flash | 81 | 81 (both) |
 
-Three of the four reasoning models lost their thinking entirely. The fourth emits both spellings,
-which is why the bug is easy to miss — **whether it bites depends on the vLLM version each model was
-deployed with**, and operators commonly pin that per model at launch. PLGrid runs vLLM 0.24 for
-GLM-5.2 with `--reasoning-parser glm45` correctly set, so this was never a serving misconfiguration.
+Three of four reasoning models lost their thinking entirely. The fourth emits both spellings, which
+is why it is easy to miss: **the spelling depends on the vLLM version each model was deployed with**,
+and operators pin that per model at launch. End-to-end A/B: stock delivered **0** thinking blocks,
+patched delivered **1 block / 162 deltas**. For reasoning-first models this can also empty the
+visible answer — a non-streaming GLM-5.2 probe returned reasoning text with `content: null`.
 
-End-to-end A/B, same request, thinking enabled:
+### 2. Context-limit errors were unrecognisable
 
-| | Thinking blocks reaching Claude Code | `thinking_delta` events |
-|---|---|---|
-| stock 7.2.110 | **0** | **0** |
-| patched | **1** | **162** |
+Claude Code compacts only when the upstream message matches
+`prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)`. PLGrid's wording does not. The fix restates
+it, preserving the original text. Two compactable shapes are rewritten; a pure `max_tokens`
+rejection is deliberately left alone, since compacting cannot fix it.
 
-For reasoning-first models the damage exceeds losing thinking blocks. A non-streaming probe of
-GLM-5.2 returned substantial `reasoning` text with **`content: null`** — so dropping the field can
-leave the visible answer empty, and streaming showed 42 reasoning chunks against 2 content chunks.
+A/B on the same oversized request: stock leaks `API Error: 400 {"detail": …}`; patched emits
+`prompt is too long: 66511 tokens > 32768 maximum (…)`, which the client acts on.
 
-**This is a strong candidate explanation for the instruction shortcutting.** GLM-5.2 was planning in
-`reasoning`, the proxy discarded it, and the model was effectively driven with its plan removed from
-the transcript — consistent with "claims completion without doing the work". Stated as a candidate,
-not proven: we have not re-run the original 5-read probe against the patched build.
-
-Fix: `groundnuty/CLIProxyAPI@fix/accept-openai-reasoning-field` — adds `openAIReasoningNode()`, which
-prefers `reasoning_content` and falls back to `reasoning`, across all three read sites (streaming
-delta, single-choice non-streaming, non-streaming message loop). Preferring the existing spelling
-keeps DeepSeek-style backends byte-identical, so the change is additive. 4 new tests, package green.
-
-Still worth checking, and unaffected by this fix:
-[vLLM #39757](https://github.com/vllm-project/vllm/issues/39757) truncates GLM tool names in
-streaming but not with `stream=False`, and
-[#42400](https://github.com/vllm-project/vllm/issues/42400) reports that behind Claude Code with our
-parser pair. Those are vLLM-level. Keep `tool_choice` at `auto` —
-[#50399](https://github.com/vllm-project/vllm/issues/50399) shows GLM-5.2-FP8 emitting ~127 duplicate
-calls under `"required"`.
-
-For the operators: the vLLM recipe warns *"If you need tool calling and MTP at the same time, use the
-latest `main` branch"* while its own recommended command enables both. And discount the vendor's
-Terminal-Bench 2.1 claim of 81.0 — the [official leaderboard](https://www.tbench.ai/leaderboard/terminal-bench/2.1)
-puts GLM-5.1 **in Claude Code** at 58.7%.
-
-**Serving settings for the reviewer subagent** (from the Qwen3.6-27B card): temperature 0.6,
-top_p 0.95, top_k 20, min_p 0.0, presence_penalty 0.0 — the "precise coding" preset. Note the
-Qwen3.6-35B-A3B card's *general* preset uses presence_penalty 1.5, which would penalise the
-legitimately repetitive structure of tool calls; use the coding preset for agent work.
-
-**No candidate publishes IFEval, IFBench, or Multi-IF**, and BFCL v4 scores are not extractable.
-The benchmark family that would most directly measure instruction adherence is absent for all six
-models — worth knowing before treating any of these numbers as decisive on this axis.
+[PR #4321](https://github.com/router-for-me/CLIProxyAPI/pull/4321) upstream targets the same area but
+does not solve this case — it gates on an `error.code` field PLGrid does not send and never produces
+the required numeric shape. A PR should reference it.
 
 ## The proxy as a per-model compatibility layer
 
-**This is the general lesson, and it is worth stating plainly: the gateway serves each model from
-whatever vLLM version was current when that model was deployed, and operators rarely upgrade a
-running deployment.** So "OpenAI-compatible" is not one API — it is a family of versions with
-per-model differences. The proxy is the correct place to absorb them, because it is the only layer
-that sees both the real upstream behaviour and what Claude Code requires.
+The gateway serves each model from whatever vLLM version was current at its deployment, so
+"OpenAI-compatible" is a family of versions, not one API. The proxy is the right place to absorb the
+differences. Measured surface:
 
-All three fixes in this setup are instances of the same pattern:
+| Model | `reasoning_effort` | `max_completion_tokens` | `tool_choice:"required"` |
+|---|---|---|---|
+| GLM-5.2-FP8 | 422 | 200 | 200 |
+| GLM-4.7-Flash | 422 | 200 | **500** |
+| Qwen3.6-27B | 422 | 200 | 200 |
+| gemma-4-31B | 422 | 200 | 200 |
 
-| Difference | Where absorbed | Mechanism |
-|---|---|---|
-| `reasoning` vs `reasoning_content` | proxy code (patched) | accept both spellings |
-| Context-limit error wording | proxy code (patched) | restate in the phrase the client matches |
-| `reasoning_effort` rejected | proxy **config** | `payload.filter` strips the field |
-
-Measured per-model API surface, which is what makes the point concrete:
-
-| Model | `reasoning_effort` | `max_completion_tokens` | `tool_choice:"required"` | Error shape |
-|---|---|---|---|---|
-| GLM-5.2-FP8 | **422** | 200 | 200 | `{"detail":…}` |
-| GLM-4.7-Flash | **422** | 200 | **500** | `{"detail":…}` |
-| Qwen3.6-27B | **422** | 200 | 200 | `{"detail":…}` |
-| gemma-4-31B | **422** | 200 | 200 | `{"detail":…}` |
-
-Two things stand out. `reasoning_effort` is rejected by **every** model, so the `payload.filter` rule
-is not GLM-specific — it is gateway-wide. And GLM-4.7-Flash alone returns **500** on
-`tool_choice: "required"` where the others accept it, which is exactly the per-model version drift to
-expect. That one is currently latent: across 40 request logs Claude Code never sent `tool_choice`, so
-it costs nothing today but would surface if a future release started using it.
-
-### What can be shimmed in config, without patching
-
-`payload` rules take a model glob and a protocol, so per-model shims need no code:
+Request-shape differences need no code — `payload` rules take a model glob:
 
 ```yaml
 payload:
-  filter:                                   # strip fields an upstream rejects
+  filter:                                   # strip what an upstream rejects
     - models: [{name: "*", protocol: "openai"}]
       params: ["reasoning_effort"]
-  override:                                 # force a value for specific models
+  override:                                 # force a value for one model
     - models: [{name: "glm-4.7-flash-202k", protocol: "openai"}]
-      params: {tool_choice: "auto"}         # this model 500s on "required"
-  default:                                  # set only when the client omitted it
+      params: {tool_choice: "auto"}
+  default:                                  # set only if the client omitted it
     - models: [{name: "qwen3.6-*", protocol: "openai"}]
       params: {temperature: 0.6, top_p: 0.95}
 ```
 
-That last one is worth noting: the Qwen3.6 cards specify temperature 0.6 / top_p 0.95 for precise
-coding, and Claude Code does not let you set sampling parameters. A `payload.default` rule is the only
-place to apply vendor-recommended sampling — a real capability gain, not just a workaround.
+That last rule is a real capability gain: the Qwen cards specify temperature 0.6 / top_p 0.95 for
+precise coding and Claude Code exposes no sampling controls, so `payload.default` is the only place
+to apply vendor-recommended sampling. Response-shape differences still need code.
 
-### What still needs code
-
-Response-shape differences, because `payload` rules only rewrite requests. The `reasoning` spelling and
-the context-limit error wording both had to be patched. If a future model returns some third variant,
-the same three read sites in `openai_claude_response.go` are where it goes.
-
-### The diagnostic that finds these
-
-Probe each model directly and compare, rather than assuming the catalogue is homogeneous:
+**Diagnostic to run when a model is added or a deployment is upgraded** — this is what found fix 1:
 
 ```bash
 for m in <model-ids>; do
@@ -418,109 +261,57 @@ for m in <model-ids>; do
 done
 ```
 
-Run it when a model is added or a deployment is upgraded. It found the `reasoning` bug in one pass, and
-it is how the table above was built.
+## Verified behaviour
 
-## Final end-to-end verification, on the patched build
+All on the patched build with the canonical config.
 
-An earlier round of tests ran against the **stock** proxy on port 8317, which proved the setup but not
-the fixes. Re-run in full against a binary built from `main` with both fixes (verified byte-identical
-by SHA-256 to the tested binary), single session, canonical settings:
-
-| Step | Result |
+| Capability | Result |
 |---|---|
-| Status line rendering real limit | `glm-5.2-fp8-393k[1m] · 0.0k/393k … 0%` |
-| Subagents on two other models | both bugs found and correctly diagnosed |
-| Thinking blocks reaching the client | **16 of 18 requests** carried them (0 on stock) |
-| Reasoning visible in the transcript | `∴ The user's message is …` rendered inline |
-| Auto-compaction firing | `✽ Compacting conversation…` at 111.4k |
-| Context after compaction | **111.4k → 34.6k** |
-| Session usable afterwards | yes, answered a follow-up |
+| Multi-turn agentic loop, real tool use | Diagnosed and fixed a real bug; 4/4 tests passing |
+| Six of six reachable models complete a task | Verified |
+| GLM-5.2 primary + Qwen/gemma subagents | Verified on the wire, per-agent ids, all 200 |
+| Qwen3.6-27B primary + GLM/gemma subagents | Verified; status line correctly read 262k |
+| Thinking blocks reaching the client | 16 of 18 requests (0 on stock) |
+| Auto-compaction firing and recovering | `Compacting conversation…`, 111.4k → 34.6k, session continued |
+| Manual `/compact` | 35,348 → 0 tokens, session usable after |
+| `--resume` | Transcript reloaded, history retained |
+| MCP tools | Server connected; GLM-5.2 returned a server-only sentinel value |
+| `availableModels` with non-`claude` ids | Picker reduced to Default plus allowed models |
+| Images | `Qwen3-VL-8B` and `gemma-4-31B` correct; GLM-5.2 is not multimodal |
 
-All four requirements hold on the patched build: model switching with the right window, subagents on
-different models, standard behaviour at the limit, and a full end-to-end run.
+**MCP needs nonessential traffic enabled.** The settings file sets
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"`; drop it if you use MCP, and do not pass
+`--strict-mcp-config`.
 
-## Known bugs and shortcomings
+## Known issues
 
-Honest list of what is still wrong or unproven.
+**Prompting sensitivity on GLM-5.2.** It occasionally substitutes a cheaper tool or reports
+completion early when a prompt makes the shortcut reasonable. Retested and largely exonerated: 5/5
+tool calls in a direct API probe (streaming and not), and `tool_use=5, tool_result=5` through Claude
+Code when the requirement was explicit. **Phrase requirements verifiably** ("read all five, then
+report the marker from each") rather than by effort ("read them completely").
 
-### Model behaviour — retested, and largely exonerated
+**Not upstream.** Both fixes need a source build and manual rebasing on upstream releases until a PR
+lands.
 
-Earlier revisions reported that GLM-5.2 "claims completion without doing the work" and treated it as
-the biggest open risk. **Retested directly, and it does not reproduce.**
+**Unexplained.** 74 of 158 `count_tokens` calls returned `503` in one window and the cause was never
+established (`disable-cooling: true` is the leading hypothesis, now set; not reproducible since). And
+GLM-4.7-Flash returns `500` on `tool_choice: "required"` where other models return 200 — latent,
+since Claude Code never sent `tool_choice` across 40 logged requests. A `payload.override` forcing
+`auto` is the shim if it surfaces.
 
-**Probe 1 — raw API, streaming vs non-streaming** (targets
-[vLLM #39757](https://github.com/vllm-project/vllm/issues/39757), truncated tool names in streaming).
-Asked GLM-5.2 for five tool calls in one turn:
+**Untested.** `/rewind`, hooks, plugins, and long unattended runs (hours) behind the proxy.
 
-| Mode | Tool calls | Names | Argument bytes |
-|---|---|---|---|
-| non-streaming | **5/5** | all `read_file`, none truncated | 90 |
-| streaming | **5/5** | all `read_file`, none truncated | 90 |
+**Anthropic does not support this configuration.** "Anthropic doesn't endorse, maintain, or audit
+third-party gateway products, and doesn't support routing Claude Code to non-Claude models through
+any gateway." Expect no vendor help when a Claude Code release changes the wire format; pin the CLI
+version for anything important.
 
-Byte-identical. **#39757 does not reproduce on PLGrid's vLLM 0.24.** Streaming is not the cause, and
-the model emits five tool calls correctly when asked.
+## Security notes on the proxy
 
-**Probe 2 — through Claude Code, Bash denied.** Five files, "read all five, then report each
-marker". Proxy log: `tool_use=5, tool_result=5`, 82,024 tokens, all five markers correct including an
-exact line count. It read everything.
+CLIProxyAPI is dual-purpose. The BYOK path used here is plain API-key code, but the same binary
+contains uTLS Cloudflare-fingerprint evasion and a Claude Code impersonation mode. None of it is
+exercised by this config — decide whether shipping that binary is acceptable in your environment.
 
-**Probe 3 — identical task, Bash allowed** (to test whether tool substitution was the trigger):
-`Read_calls=12, Bash_calls=2`, 81,652 tokens, correct answer. It still read the files; the two Bash
-calls were supplementary, not substitutes.
-
-**Conclusion: the original observations were real but not characteristic.** Both earlier failures came
-from prompts where the shortcut was *reasonable* — "read every .txt file" with no stated reason to
-avoid `tail`, and a five-offset instruction where partial completion still answered the question. With
-an explicit, verifiable requirement the model complies. This is a prompting sensitivity, not an
-unreliability that rules the model out for unattended work.
-
-What was **not** established: whether the reasoning-field fix contributed. Probes 2 and 3 ran on the
-patched build, so reasoning was flowing; the earlier failures were on stock, where it was discarded.
-The variables are confounded and separating them would need a stock-build rerun. Not worth it — the
-fix is correct on its own merits.
-
-**Practical guidance:** state the requirement in verifiable terms ("read all five, then report the
-marker from each") rather than in terms of effort ("read them completely"). That is good prompting
-for any model; GLM-5.2 is merely less forgiving than a frontier model when it is skipped.
-
-### Shipping and process
-
-- **Neither fix is upstream.** Both are merged into `main` on `groundnuty/CLIProxyAPI` and verified,
-  but no PR is open against `router-for-me/CLIProxyAPI`. Until one lands, this needs a source build,
-  and rebasing on upstream releases is manual.
-- **[PR #4321](https://github.com/router-for-me/CLIProxyAPI/pull/4321) overlaps** the context-limit
-  fix and is open upstream. It gates on an `error.code` field PLGrid does not send and never produces
-  the `N tokens > M` shape the client needs, so it does not solve this case — but a PR should
-  reference it rather than conflict silently.
-
-### Previously untested surfaces — now tested
-
-All verified on the patched build (port 8319) with the canonical config.
-
-| Surface | Result |
-|---|---|
-| **MCP tools** | **Works.** A stdio MCP server showed `magic · ✔ connected · 1 tool` in `/mcp`, and GLM-5.2 invoked it, returning `MAGIC_NUMBER_8675309` — a value existing only inside the server, so the call was real. |
-| **Manual `/compact`** | **Works** with headroom and history: 35,348 → 0 tokens, and the session answered normally afterwards. |
-| **`--resume`** | **Works.** Session appeared in the resume picker, transcript reloaded, history retained (39,522 tokens), responsive. |
-| **`availableModels` with non-`claude` ids** | **Works.** With `["glm-5.2-fp8-393k","qwen3.6-27b-262k"]` and `enforceAvailableModels: true`, the picker reduced to Default plus the allowed model — every Anthropic entry gone. |
-| **Images** | **Model-dependent.** `Qwen3-VL-8B-Instruct` and `gemma-4-31B` both correctly answered "Red" for a 64×64 red PNG. `GLM-5.2-FP8` returns `400 … is not a multimodal model`. |
-
-Two caveats on the above. **MCP needs nonessential traffic enabled** — the canonical config sets
-`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"`, and this test ran without `--strict-mcp-config`;
-if you use MCP, drop that variable and re-verify. **`/compact` reports `Not enough messages to
-compact` on a fresh session**, which is correct behaviour rather than a fault — build a few turns
-first.
-
-On images: since the primary model is not multimodal, pasting an image into a GLM-5.2 session will
-fail. Route image work to a `Qwen3-VL-8B` subagent, and note the earlier finding that an unreadable
-image can make a session unresumable on a non-vision model.
-
-### Unexplained observations
-
-- **74 of 158 `count_tokens` calls returned 503 in one window**, and the cause was never established.
-  `disable-cooling: true` is the leading hypothesis and is now set, but the correlation was not
-  proven. Not reproducible since.
-- **`tool_choice: "required"` returns 500 on GLM-4.7-Flash** where other models return 200. Latent:
-  Claude Code never sent `tool_choice` in 40 logs. A `payload.override` forcing `auto` is the shim if
-  it ever surfaces.
+Its shipped defaults are also unsafe: `host: ""` binds all interfaces and auth is fail-open when
+`api-keys` is empty, i.e. an open relay to your grant key. The config here overrides both.
