@@ -444,23 +444,45 @@ different models, standard behaviour at the limit, and a full end-to-end run.
 
 Honest list of what is still wrong or unproven.
 
-### Model behaviour — the biggest open issue
+### Model behaviour — retested, and largely exonerated
 
-**GLM-5.2 shortcuts instructions, and restoring reasoning did not fix it.** In the final test it
-replied `OK01`–`OK04` to four "read this file completely" requests having called `Read` **once**,
-while thinking blocks were confirmed flowing. So the earlier theory — that the proxy discarding
-`reasoning` caused the shortcutting — is **weakened, not confirmed**. The reasoning fix is still
-correct and valuable, but it is not the explanation for this.
+Earlier revisions reported that GLM-5.2 "claims completion without doing the work" and treated it as
+the biggest open risk. **Retested directly, and it does not reproduce.**
 
-Untested and still the cheapest next probe: **re-run non-streaming**.
-[vLLM #39757](https://github.com/vllm-project/vllm/issues/39757) shows GLM tool names silently
-truncated in streaming but correct with `stream=False`, and
-[#42400](https://github.com/vllm-project/vllm/issues/42400) reports exactly that behind Claude Code
-with this parser pair. That is vLLM-level, so a question for the operators as much as for us.
+**Probe 1 — raw API, streaming vs non-streaming** (targets
+[vLLM #39757](https://github.com/vllm-project/vllm/issues/39757), truncated tool names in streaming).
+Asked GLM-5.2 for five tool calls in one turn:
 
-Practical mitigation today: for work that must not be skipped, prefer explicit single-step prompts, or
-delegate to a `qwen3.6-27b-262k` subagent — which completed its audit correctly every time it was
-asked.
+| Mode | Tool calls | Names | Argument bytes |
+|---|---|---|---|
+| non-streaming | **5/5** | all `read_file`, none truncated | 90 |
+| streaming | **5/5** | all `read_file`, none truncated | 90 |
+
+Byte-identical. **#39757 does not reproduce on PLGrid's vLLM 0.24.** Streaming is not the cause, and
+the model emits five tool calls correctly when asked.
+
+**Probe 2 — through Claude Code, Bash denied.** Five files, "read all five, then report each
+marker". Proxy log: `tool_use=5, tool_result=5`, 82,024 tokens, all five markers correct including an
+exact line count. It read everything.
+
+**Probe 3 — identical task, Bash allowed** (to test whether tool substitution was the trigger):
+`Read_calls=12, Bash_calls=2`, 81,652 tokens, correct answer. It still read the files; the two Bash
+calls were supplementary, not substitutes.
+
+**Conclusion: the original observations were real but not characteristic.** Both earlier failures came
+from prompts where the shortcut was *reasonable* — "read every .txt file" with no stated reason to
+avoid `tail`, and a five-offset instruction where partial completion still answered the question. With
+an explicit, verifiable requirement the model complies. This is a prompting sensitivity, not an
+unreliability that rules the model out for unattended work.
+
+What was **not** established: whether the reasoning-field fix contributed. Probes 2 and 3 ran on the
+patched build, so reasoning was flowing; the earlier failures were on stock, where it was discarded.
+The variables are confounded and separating them would need a stock-build rerun. Not worth it — the
+fix is correct on its own merits.
+
+**Practical guidance:** state the requirement in verifiable terms ("read all five, then report the
+marker from each") rather than in terms of effort ("read them completely"). That is good prompting
+for any model; GLM-5.2 is merely less forgiving than a frontier model when it is skipped.
 
 ### Shipping and process
 
