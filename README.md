@@ -1,11 +1,33 @@
 # Claude Code on PLGrid LLMLab
 
 Run the [Claude Code](https://code.claude.com) CLI against the open-weight models hosted on
-[PLGrid LLMLab](https://llmlab.plgrid.pl) (ACK Cyfronet) — GLM-5.2, Qwen3.6, Gemma 4 — instead of
-Anthropic's API.
+[PLGrid LLMLab](https://llmlab.plgrid.pl) (ACK Cyfronet) — GLM-5.2, Qwen3.6, Gemma 4 — either
+instead of Anthropic's models or **alongside them in the same session**.
 
-Verified end-to-end on 2026-07-30 with Claude Code **2.1.220**: multi-turn agentic coding, tool use,
-subagents pinned to different models, auto-compaction, MCP, and `--resume`.
+## What you get
+
+Three launch profiles. Pick one per project; switch any time.
+
+| | `bin/claude-opus` | `bin/claude-glm` | `bin/claude-qwen` |
+|---|---|---|---|
+| **Runs your session** | Claude Opus 5, `xhigh` effort | GLM-5.2-FP8 | Qwen3.6-27B |
+| **Delegates to** | GLM-5.2 + Qwen3.6 subagents | any lab model | any lab model |
+| **Usable context** | 200k (see [limitation](#known-limitation-opus-reports-a-200k-window)) | **393k** — full | **262k** — full |
+| **Costs** | your Claude subscription | grant compute only | grant compute only |
+| **Speed** | Opus latency + delegation | fastest (11s) | slower (50s) |
+| **Best for** | hard problems: strong reasoning plans it, lab models build it | day-to-day agentic coding | careful review passes |
+
+**`claude-opus` is the one to look at.** Claude Opus 5 orchestrates on your existing Claude
+subscription and delegates implementation to GLM-5.2 and Qwen3.6 as **native Claude Code subagents** —
+real subagents with their own context windows and tools, not tool calls or MCP shims. No API key, no
+impersonation. The expensive model does the thinking; grant compute does the volume.
+
+All three give you the full Claude Code experience against lab models: multi-turn agentic loops, tool
+use, auto-compaction, MCP servers, `--resume`, and a status line showing usage against each model's
+**real** context window. Autonomous operation works without `--dangerously-skip-permissions`.
+
+Verified end-to-end on 2026-07-30 with Claude Code **2.1.220** — every claim above was measured, and
+what did **not** work is documented too.
 
 ---
 
@@ -26,16 +48,21 @@ make proxy         # downloads the patched proxy and starts it
 make test          # end-to-end check: expect PLGRID_OK
 ```
 
-Then, from any project directory:
+Then, from any project directory, pick a profile:
 
 ```bash
-/path/to/plgrid-llmlab-claude-code/bin/claude-glm     # GLM-5.2-FP8 primary  (393k context)
-/path/to/plgrid-llmlab-claude-code/bin/claude-qwen    # Qwen3.6-27B primary  (262k context)
+/path/to/plgrid-llmlab-claude-code/bin/claude-glm     # GLM-5.2-FP8 drives   (393k context)
+/path/to/plgrid-llmlab-claude-code/bin/claude-qwen    # Qwen3.6-27B drives   (262k context)
 ```
 
-Either script installs `.claude/settings.json` and `.claude/statusline.sh` into the current project
-on first run (never overwriting an existing one), checks the proxy is reachable and serving the
-model, then launches Claude Code. Put `bin/` on your `PATH` to drop the full path.
+For `bin/claude-opus` — Opus orchestrating lab subagents — use the Opus proxy config and log in once
+against your subscription first; see [that section](#opus-orchestrating-lab-models-doing-the-work).
+
+Each script installs `.claude/settings.json`, `.claude/statusline.sh` (and for `claude-opus`, the lab
+subagents) into the current project on first run, never overwriting anything that already exists. It
+also checks the proxy is up and actually serving the model before launching, so an alias typo fails
+immediately with a useful message instead of mid-session. Put `bin/` on your `PATH` to drop the full
+path.
 
 You should see:
 
