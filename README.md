@@ -12,7 +12,7 @@ Three launch profiles. Pick one per project; switch any time.
 |---|---|---|---|
 | **Runs your session** | Claude Opus 5, `xhigh` effort | GLM-5.2-FP8 | Qwen3.6-27B |
 | **Delegates to** | **any lab *or* Anthropic model** | any lab model | any lab model |
-| **Compacts at** | 200k ([why](#known-limitation-opus-compacts-at-200k)) | **393k** — full window | **262k** — full window |
+| **Context window** | **1M** — Opus 5 native | **393k** — full window | **262k** — full window |
 | **Costs** | your Claude subscription | grant compute only | grant compute only |
 | **Speed** | Opus latency + delegation | fastest (11s) | slower (50s) |
 | **Best for** | hard problems: strong reasoning plans it, cheap models build it | day-to-day agentic coding | careful review passes |
@@ -109,9 +109,9 @@ for measurements and A/B evidence, and [Fork and releases](#fork-and-releases) b
 
 ## Opus orchestrating, lab models doing the work
 
-**The capability this repo exists for:** Claude Opus 5 at `xhigh` effort runs your session on your
-Claude subscription, and delegates to **native Claude Code subagents** — real subagents with their
-own context and tools, not tool calls. No API key. No impersonation.
+**The capability this repo exists for:** Claude Opus 5 at `xhigh` effort with its **full 1M context**
+runs your session on your Claude subscription, and delegates to **native Claude Code subagents** —
+real subagents with their own context and tools, not tool calls. No API key. No impersonation.
 
 Because one endpoint serves both providers, a subagent can be pinned to **any model the proxy
 serves** — lab or Anthropic — and they mix freely in one session.
@@ -143,7 +143,7 @@ Verified, one session:
 
 | Inbound | → Upstream | Role | Evidence |
 |---|---|---|---|
-| `claude-opus-5` | Anthropic (your subscription) | main | wire, 200 |
+| `claude-opus-5[1m]` | Anthropic (your subscription) | main, 1M window | wire, 200 |
 | `glm-5.2-fp8-393k` | `zai-org/GLM-5.2-FP8` | subagent | wire, 200 |
 | `qwen3.6-27b-262k` | `Qwen/Qwen3.6-27B` | subagent | wire, 200 |
 | `claude-haiku-4-5-20251001` | Anthropic | subagent | correct result in session |
@@ -172,47 +172,38 @@ could read the token file, and requests could be served by someone else's subscr
 lab-operated shared proxy is fine for the LLMLab leg — that is a lab-issued grant key — but must
 never hold subscription tokens.
 
-### Known limitation: Opus compacts at 200k
+### Context windows: how each profile gets its real one
 
-Behind any gateway, Claude Code cannot resolve registry context windows, so it treats Opus as a 200k
-model. `/context` reports it directly:
+Every profile runs at its model's true window, but by two different mechanisms.
+
+**Opus uses its native 1M**, via the `[1m]` suffix on `ANTHROPIC_MODEL`. Claude Code strips the
+suffix before the wire and converts it into a `context-1m-2025-08-07` beta header, which the proxy
+forwards untouched. Measured:
 
 ```
-Auto-compact window: 200k tokens
+Opus 5 (1M context) · 69.8k/1000k █░░░░░░░░░░░░░░░░░░░ 7%
+Free space: 933.2k (93.3%)
 ```
 
-**This is not a setting we chose, and it cannot be raised.** `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is
-documented as clamped to "at most the model's context window" — and since the client believes that
-window is 200k, the setting clamps to itself. Measured, same session, only the variable changed:
+Without the suffix it falls back to 200k, because behind a gateway Claude Code cannot resolve
+registry context windows. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` does **not** help there — it is documented
+as clamped to "at most the model's context window", so with the client believing 200k it clamps to
+itself (measured: `1000000` still reported 200k). The suffix works because it does not raise a
+believed limit, it enables a real upstream capability.
 
-| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | Reported window |
-|---|---|
-| unset | 200k |
-| `1000000` | **200k** (silently clamped) |
+**Lab profiles use `CLAUDE_CODE_MAX_CONTEXT_TOKENS`** set to each model's exact real window —
+`393216` for GLM-5.2, `262144` for Qwen3.6-27B. That path is not clamped because the values sit at
+or below what the client already assumes.
 
-So the profile leaves it **unset** — not as a compromise, but because setting it changes nothing for
-Opus and would over-declare for lab subagents. Claude Code manages the main session natively, and
-subagents run against their own models without any imposed limit.
+**Subagents are deliberately left unset.** The variable is process-wide, so any value would be wrong
+for one participant. Unset means lab subagents fall back to 200k — below the smallest real window in
+the catalogue (`glm-4.7-flash`, 202,752), so nothing can overflow. Under-using a subagent's context
+is safe; over-declaring is not.
 
-Everything else was checked and is closed:
-
-| Mechanism | Per-model? |
-|---|---|
-| Model registry | hardcoded — two literals |
-| Gateway `/v1/models` | **no window field in the schema** |
-| Bootstrap `auto_compact_windows` | exists, first-party only — **tested, never requested behind a proxy** |
-| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | process-wide, and clamped as above |
-| Agent frontmatter | no window field |
-
-`auto_compact_windows` is a genuine model→window map inside Claude Code — exactly the right
-mechanism — but it ships only over the first-party bootstrap endpoint, which is skipped for gateway
-sessions and needs a first-party credential the client does not have behind a proxy.
-
-**What this actually costs you.** 200k is the point where the session compacts, not a ceiling on the
-work — the session continues indefinitely through compaction. In this profile Opus spends its context
-planning and delegating rather than reading files, so 200k is rarely the binding constraint. If you
-want a full window on a lab model, use `bin/claude-glm` or `bin/claude-qwen`, which set the exact
-real window per profile.
+For completeness, these do **not** offer per-model windows and were each checked: the model registry
+(hardcoded, two literals), gateway `/v1/models` discovery (no window field in the schema), agent
+frontmatter (no window field), and the bootstrap `auto_compact_windows` map (real, but first-party
+only — never requested behind a proxy).
 
 ## Repository layout
 
