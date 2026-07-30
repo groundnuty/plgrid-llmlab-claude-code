@@ -97,9 +97,14 @@ opened**: `groundnuty/CLIProxyAPI@fix/normalize-vllm-context-limit-errors`. Usin
 build (Go 1.26):
 
 ```bash
-git clone -b fix/normalize-vllm-context-limit-errors https://github.com/groundnuty/CLIProxyAPI
-cd CLIProxyAPI && go build -o cli-proxy-api ./cmd/server
+git clone https://github.com/groundnuty/CLIProxyAPI && cd CLIProxyAPI
+git checkout fix/accept-openai-reasoning-field          # thinking blocks — see below
+git merge --no-edit fix/normalize-vllm-context-limit-errors   # automatic context limits
+go build -o cli-proxy-api ./cmd/server
 ```
+
+**Two independent fixes live on that fork, both verified against PLGrid.** The reasoning-field fix
+matters for every reasoning model and is the more important of the two.
 
 Verified A/B on the same oversized request: stock leaks `API Error: 400 {"detail": …}`; patched
 emits `prompt is too long: 66511 tokens > 32768 maximum (…)`, which the client recognises.
@@ -245,55 +250,60 @@ in local testing. `qwen3.6-27b-262k` as reviewer subagent — best coding number
 latency is irrelevant for a review pass. **Avoid** `glm-4.7-flash-202k`: it returned a wrong answer
 here, and publishes no tool-use benchmark at all.
 
-**On the instruction-shortcutting we observed on GLM-5.2 — corrected.** An earlier revision of this
-document cited [claude-code-router #1400](https://github.com/musistudio/claude-code-router/issues/1400)
-as a likely cause. **That citation was misapplied.** claude-code-router is a *different proxy* and is
-not installed here (no `ccr` binary, no `~/.claude-code-router`, absent from npm). We use
-**CLIProxyAPI**, and it does not have that defect:
-`internal/translator/openai/claude/openai_claude_request.go` emits a single unified assistant message
-carrying `content`, `reasoning_content` **and** `tool_calls` together, with the comment *"This avoids
-splitting into multiple assistant messages which breaks OpenAI tool-call adjacency"* — i.e. it
-implements exactly what #1400 reports CCR failing to do.
+**Root cause found: the proxy was discarding every model's chain of thought.** An earlier revision
+blamed [claude-code-router #1400](https://github.com/musistudio/claude-code-router/issues/1400) — a
+misapplied citation, since that is a different proxy and is not installed here. The real defect was in
+CLIProxyAPI, and it is now fixed and measured.
 
-Verified on real traffic instead, across 40 request logs from the R4 session:
+The OpenAI-to-Claude response translator read reasoning only from `reasoning_content`. vLLM's
+OpenAI-compatible server emits **`reasoning`** instead, matching the OpenAI Responses API. Measured
+streaming delta chunks from PLGrid for one short prompt:
 
-| Observation | Count |
-|---|---|
-| Requests where Claude Code sent inbound `thinking` blocks | **0 / 40** |
-| Requests forwarding `reasoning_content` upstream | **0 / 40** |
-| `reasoning_content` in any PLGrid **response** | **0** |
-| Requests asking for thinking (`"thinking":{"type":"adaptive"}`) | all |
+| Model | `reasoning` | `reasoning_content` |
+|---|---|---|
+| `zai-org/GLM-5.2-FP8` | **42** | **0** |
+| `Qwen/Qwen3.6-27B` | **120** | **0** |
+| `Qwen/Qwen3.6-35B-A3B` | **120** | **0** |
+| `zai-org/GLM-4.7-Flash` | 81 | 81 (both) |
+| `Qwen/Qwen3-Coder-30B` | 0 | 0 (non-reasoning) |
+| `google/gemma-4-31B` | 0 | 0 (non-reasoning) |
 
-So the reasoning round-trip is not being broken by the proxy — **it never starts.** Claude Code asks
-for adaptive thinking on every request, PLGrid returns no `reasoning_content` at all, and with nothing
-returned there is nothing for the client to replay. The likely cause is server-side: PLGrid appears
-not to be running GLM-5.2 with `--reasoning-parser glm45`, so chain-of-thought is either suppressed or
-folded into `content` rather than surfaced as a separate field. **That is a question for the gateway
-operators**, and it is on the list in the performance report.
+Three of the four reasoning models lost their thinking entirely. The fourth emits both spellings,
+which is why the bug is easy to miss — **whether it bites depends on the vLLM version each model was
+deployed with**, and operators commonly pin that per model at launch. PLGrid runs vLLM 0.24 for
+GLM-5.2 with `--reasoning-parser glm45` correctly set, so this was never a serving misconfiguration.
 
-Implication for model behaviour: GLM-5.2 is running effectively without exposed reasoning. Z.ai's
-[thinking-mode docs](https://docs.z.ai/guides/capabilities/thinking-mode) require *"the complete,
-unmodified reasoning_content"* be returned across turns, and thinking is on by default — so the model
-is being driven off its intended configuration. That remains a plausible contributor to shortcutting,
-but by a different mechanism than first reported, and one neither we nor the proxy can fix.
+End-to-end A/B, same request, thinking enabled:
 
-The **streaming** hypothesis is still live and untested, and is the cheapest next check:
-[vLLM #39757](https://github.com/vllm-project/vllm/issues/39757) shows a GLM tool name silently
-truncated (`get_weather` → `get`) in streaming mode but correct with `stream=False`, and
-[#42400](https://github.com/vllm-project/vllm/issues/42400) reports that exact failure behind Claude
-Code with our parser pair. Those are vLLM-level, so they apply regardless of which proxy sits in
-front. Unconfirmed here.
+| | Thinking blocks reaching Claude Code | `thinking_delta` events |
+|---|---|---|
+| stock 7.2.110 | **0** | **0** |
+| patched | **1** | **162** |
 
-Ordered diagnostic, cheapest first:
+For reasoning-first models the damage exceeds losing thinking blocks. A non-streaming probe of
+GLM-5.2 returned substantial `reasoning` text with **`content: null`** — so dropping the field can
+leave the visible answer empty, and streaming showed 42 reasoning chunks against 2 content chunks.
 
-1. Re-run a multi-step tool task **non-streaming** — separates parser from model in one test.
-2. Ask the operators whether `--reasoning-parser glm45` is set; the evidence above suggests not.
-3. Keep `tool_choice` at `auto` — [vLLM #50399](https://github.com/vllm-project/vllm/issues/50399)
-   shows GLM-5.2-FP8 emitting ~127 duplicate calls under `"required"`.
-4. Only then adjust sampling. No source attributes GLM shortcutting to temperature.
+**This is a strong candidate explanation for the instruction shortcutting.** GLM-5.2 was planning in
+`reasoning`, the proxy discarded it, and the model was effectively driven with its plan removed from
+the transcript — consistent with "claims completion without doing the work". Stated as a candidate,
+not proven: we have not re-run the original 5-read probe against the patched build.
 
-Also for the operators: the vLLM recipe warns *"If you need tool calling and MTP at the same time, use
-the latest `main` branch"* while its own recommended command enables both. And discount the vendor's
+Fix: `groundnuty/CLIProxyAPI@fix/accept-openai-reasoning-field` — adds `openAIReasoningNode()`, which
+prefers `reasoning_content` and falls back to `reasoning`, across all three read sites (streaming
+delta, single-choice non-streaming, non-streaming message loop). Preferring the existing spelling
+keeps DeepSeek-style backends byte-identical, so the change is additive. 4 new tests, package green.
+
+Still worth checking, and unaffected by this fix:
+[vLLM #39757](https://github.com/vllm-project/vllm/issues/39757) truncates GLM tool names in
+streaming but not with `stream=False`, and
+[#42400](https://github.com/vllm-project/vllm/issues/42400) reports that behind Claude Code with our
+parser pair. Those are vLLM-level. Keep `tool_choice` at `auto` —
+[#50399](https://github.com/vllm-project/vllm/issues/50399) shows GLM-5.2-FP8 emitting ~127 duplicate
+calls under `"required"`.
+
+For the operators: the vLLM recipe warns *"If you need tool calling and MTP at the same time, use the
+latest `main` branch"* while its own recommended command enables both. And discount the vendor's
 Terminal-Bench 2.1 claim of 81.0 — the [official leaderboard](https://www.tbench.ai/leaderboard/terminal-bench/2.1)
 puts GLM-5.1 **in Claude Code** at 58.7%.
 
