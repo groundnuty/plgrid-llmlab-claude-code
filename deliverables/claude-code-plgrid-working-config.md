@@ -559,6 +559,67 @@ Project scope keeps the setting reviewable, committed, and confined to this repo
 Verify with `/config` after launching — read it, don't toggle it — and treat "Auto-compact false"
 as the first thing to check if a long session dies at the context limit.
 
+### Subagents on different models: works, and makes the window problem worse
+
+Verified on 2026-07-30, Claude Code 2.1.220. Two subagents pinned via frontmatter:
+
+```markdown
+---
+name: qwen-scout
+description: Reports the single word ALPHA. Use when asked to scout.
+model: qwen3.6-27b
+tools: Read, Glob
+---
+```
+
+Both were dispatched with the Task tool and both returned correctly. The proxy's request log
+shows each subagent reaching a *different* upstream model:
+
+```
+inbound model      -> upstream model            agent-id
+glm-5.2-fp8        -> zai-org/GLM-5.2-FP8       -          (main)
+qwen3.6-27b        -> Qwen/Qwen3.6-27B          a009ef39   (qwen-scout)
+glm-4.7-flash      -> zai-org/GLM-4.7-Flash     a4681586   (flash-scout)
+```
+
+**This contradicts [anthropics/claude-code#43869](https://github.com/anthropics/claude-code/issues/43869)**,
+which reports that frontmatter `model:`, the Agent tool's `model` parameter, and
+`CLAUDE_CODE_SUBAGENT_MODEL` are all silently ignored and resolve to the parent model. On
+2.1.220 behind a gateway, frontmatter `model:` routes correctly. It corroborates CodeRouter's
+independent measurement at 2.1.206–207. Treat #43869 as stale, or as scoped to first-party
+sessions. Subagent requests also carry `X-Claude-Code-Agent-Id`, so per-agent cost and traffic
+can be attributed at the proxy.
+
+**The consequence for context windows is the important part.** Once subagents run on different
+models, the per-model window problem stops being theoretical:
+
+| Agent | Model | Real window |
+|---|---|---|
+| main | GLM-5.2-FP8 | 393,216 |
+| qwen-scout | Qwen3.6-27B | 262,144 |
+| flash-scout | GLM-4.7-Flash | 202,752 |
+
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` is a single environment variable for the whole process, so one
+number has to serve all three. Set it for GLM-5.2 and the flash-scout blows its window; set it
+for GLM-4.7-Flash and the main agent wastes nearly half its context. There is no per-subagent
+override — subagents inherit the process environment. (Reasoned from the single-variable design
+and confirmed subagent routing, not from an overflow test on a subagent.)
+
+**No static mechanism can solve this**, which is worth stating plainly since it is the crux:
+
+- the env var is one value, read once at process start;
+- gateway discovery carries only `id` and `display_name`;
+- `_SUPPORTED_CAPABILITIES` has no effect behind a gateway and has no window field.
+
+Reactive normalisation is the only mechanism that adapts, because the limit arrives in the
+upstream error of whichever model actually overflowed — main agent or subagent, correct every
+time, no configuration. Delegating to mixed models is therefore the strongest argument for the
+patch below, not merely a nice-to-have.
+
+One clarification, since it is easy to conflate: **`count_tokens` is not what governs this.** It
+reports current *usage*, not the *limit*, and it works correctly here (40/40 in testing). Accurate
+usage was never the missing half; the limit was.
+
 ### The fix worth contributing
 
 Normalise the upstream error in the proxy into the shape Claude Code matches. Then compaction
