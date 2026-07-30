@@ -315,3 +315,78 @@ legitimately repetitive structure of tool calls; use the coding preset for agent
 **No candidate publishes IFEval, IFBench, or Multi-IF**, and BFCL v4 scores are not extractable.
 The benchmark family that would most directly measure instruction adherence is absent for all six
 models — worth knowing before treating any of these numbers as decisive on this axis.
+
+## The proxy as a per-model compatibility layer
+
+**This is the general lesson, and it is worth stating plainly: the gateway serves each model from
+whatever vLLM version was current when that model was deployed, and operators rarely upgrade a
+running deployment.** So "OpenAI-compatible" is not one API — it is a family of versions with
+per-model differences. The proxy is the correct place to absorb them, because it is the only layer
+that sees both the real upstream behaviour and what Claude Code requires.
+
+All three fixes in this setup are instances of the same pattern:
+
+| Difference | Where absorbed | Mechanism |
+|---|---|---|
+| `reasoning` vs `reasoning_content` | proxy code (patched) | accept both spellings |
+| Context-limit error wording | proxy code (patched) | restate in the phrase the client matches |
+| `reasoning_effort` rejected | proxy **config** | `payload.filter` strips the field |
+
+Measured per-model API surface, which is what makes the point concrete:
+
+| Model | `reasoning_effort` | `max_completion_tokens` | `tool_choice:"required"` | Error shape |
+|---|---|---|---|---|
+| GLM-5.2-FP8 | **422** | 200 | 200 | `{"detail":…}` |
+| GLM-4.7-Flash | **422** | 200 | **500** | `{"detail":…}` |
+| Qwen3.6-27B | **422** | 200 | 200 | `{"detail":…}` |
+| gemma-4-31B | **422** | 200 | 200 | `{"detail":…}` |
+
+Two things stand out. `reasoning_effort` is rejected by **every** model, so the `payload.filter` rule
+is not GLM-specific — it is gateway-wide. And GLM-4.7-Flash alone returns **500** on
+`tool_choice: "required"` where the others accept it, which is exactly the per-model version drift to
+expect. That one is currently latent: across 40 request logs Claude Code never sent `tool_choice`, so
+it costs nothing today but would surface if a future release started using it.
+
+### What can be shimmed in config, without patching
+
+`payload` rules take a model glob and a protocol, so per-model shims need no code:
+
+```yaml
+payload:
+  filter:                                   # strip fields an upstream rejects
+    - models: [{name: "*", protocol: "openai"}]
+      params: ["reasoning_effort"]
+  override:                                 # force a value for specific models
+    - models: [{name: "glm-4.7-flash-202k", protocol: "openai"}]
+      params: {tool_choice: "auto"}         # this model 500s on "required"
+  default:                                  # set only when the client omitted it
+    - models: [{name: "qwen3.6-*", protocol: "openai"}]
+      params: {temperature: 0.6, top_p: 0.95}
+```
+
+That last one is worth noting: the Qwen3.6 cards specify temperature 0.6 / top_p 0.95 for precise
+coding, and Claude Code does not let you set sampling parameters. A `payload.default` rule is the only
+place to apply vendor-recommended sampling — a real capability gain, not just a workaround.
+
+### What still needs code
+
+Response-shape differences, because `payload` rules only rewrite requests. The `reasoning` spelling and
+the context-limit error wording both had to be patched. If a future model returns some third variant,
+the same three read sites in `openai_claude_response.go` are where it goes.
+
+### The diagnostic that finds these
+
+Probe each model directly and compare, rather than assuming the catalogue is homogeneous:
+
+```bash
+for m in <model-ids>; do
+  curl -s -N -X POST "$BASE/chat/completions" -H "Authorization: Bearer $KEY" \
+    -H 'content-type: application/json' \
+    -d "{\"model\":\"$m\",\"max_tokens\":120,\"stream\":true,
+         \"messages\":[{\"role\":\"user\",\"content\":\"2+2? Answer briefly.\"}]}" \
+  | grep -o '"reasoning[_a-z]*"' | sort | uniq -c
+done
+```
+
+Run it when a model is added or a deployment is upgraded. It found the `reasoning` bug in one pass, and
+it is how the table above was built.
