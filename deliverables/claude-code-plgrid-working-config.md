@@ -460,11 +460,16 @@ working — the entire session below ran with no exported variables at all:
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "190000",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "DISABLE_AUTOUPDATER": "1"
-  }
+  },
+  "autoCompactEnabled": true,
+  "availableModels": ["glm-5.2-fp8", "gemma-4-31b", "qwen3.6-27b"],
+  "enforceAvailableModels": true
 }
 ```
 
-Set it once per project, commit it, done. Note this file must not contain the PLGrid key — that
+Set it once per project, commit it, done. Everything here is **project-scoped on purpose** —
+nothing in this setup should go into `~/.claude/settings.json`, because these choices are
+specific to the PLGrid gateway and would follow you into unrelated projects. Note this file must not contain the PLGrid key — that
 stays in the proxy's config. `ANTHROPIC_AUTH_TOKEN` here is only the local proxy token.
 
 ## The context-window problem, properly
@@ -504,6 +509,45 @@ the models you have enabled — 190,000 above, safe even for GLM-4.7-Flash. You 
 GLM-5.2, but you never hit a hard failure. Pair it with `availableModels` so the set of reachable
 models is known and the floor is predictable.
 
+### Does the window follow the model when you switch? No.
+
+Asked directly, and the answer is no on all three possible mechanisms — each verified:
+
+1. **`CLAUDE_CODE_AUTO_COMPACT_WINDOW` is read at process start.** Switching with `/model`
+   mid-session does not re-read it. Env vars behind a gateway are start-time only.
+2. **Gateway model discovery cannot carry a window.** From the protocol reference: "Claude Code
+   reads `id` and the optional `display_name` from each entry in the response's `data` array,
+   and ignores entries whose `id` doesn't begin with `claude` or `anthropic`." Two fields, no
+   context length. So the proxy cannot advertise per-model windows even though it knows them.
+   (Discovery also never runs while `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set.)
+3. **`_SUPPORTED_CAPABILITIES` has no effect behind an `ANTHROPIC_BASE_URL` gateway**, and its
+   value list covers effort and thinking only — no window.
+
+So with a single global number, switching from GLM-5.2 (393k) to GLM-4.7-Flash (202k) leaves
+compaction tuned for the wrong model. Hence the conservative floor above.
+
+### First, check that auto-compact is even on
+
+A prerequisite that is easy to miss: on this setup `/config` reported **`Auto-compact false`**.
+It is **off by default** behind a third-party endpoint, which matches the reported regression
+where auto-compact stopped firing for `ANTHROPIC_BASE_URL` users
+([anthropics/claude-code#65585](https://github.com/anthropics/claude-code/issues/65585)). Until
+it is enabled, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` does nothing at all.
+
+It is togglable at runtime — `/config` → *Auto-compact* → Space — but **do not configure it that
+way.** `/config` writes to **user** settings (`~/.claude/settings.json`), so it silently changes
+behaviour for every project on the machine. Declare it in the project file instead:
+
+```json
+{ "autoCompactEnabled": true }
+```
+
+Add that to the project `.claude/settings.json` shown above, alongside `permissions` and `env`.
+Project scope keeps the setting reviewable, committed, and confined to this repo.
+
+Verify with `/config` after launching — read it, don't toggle it — and treat "Auto-compact false"
+as the first thing to check if a long session dies at the context limit.
+
 ### The fix worth contributing
 
 Normalise the upstream error in the proxy into the shape Claude Code matches. Then compaction
@@ -527,6 +571,21 @@ the canonical `prompt is too long: <used> tokens > <limit>`. Combined with wirin
 `count_tokens` for `openai-compatibility` providers, that is two small, well-scoped PRs against
 the healthiest project in this space — and between them they remove the last two pieces of manual
 tuning from this setup.
+
+**This is also the only mechanism that gives per-model flexibility.** Because the limit arrives
+in the upstream error on the request that exceeded it, the number is always the active model's
+real window — no declaration, no env var, and correct immediately after a `/model` switch. Every
+alternative (env var, discovery, capability declaration) is static and start-time. That makes
+error normalisation not just a nicer fix but the *only* one that answers "does the window follow
+the model", and it is the strongest argument for spending effort there rather than on config
+ergonomics.
+
+Worth knowing while relying on the error path: Claude Code "retries automatically after some
+upstream rejections", and "the retry logic matches on the upstream's error wording, so forward
+error response bodies unmodified. A gateway that wraps upstream errors in its own envelope breaks
+the recovery path even when it preserves the status code." CLIProxyAPI currently *does* wrap —
+observed as an Anthropic envelope whose `message` is the upstream JSON as a string. So the
+normaliser has to unwrap and restate, not merely prefix.
 
 ## Model notes for this gateway
 
