@@ -54,16 +54,47 @@ diagnose.
 | `disable-cooling: true` | proxy config | Cooldown is per (auth, model). With one credential, any failure blacks out that model for ~60s with `503`, so a compaction retry hits the model it needs. |
 | `CLAUDE_CODE_ATTRIBUTION_HEADER: "0"` | project settings | Claude Code prepends a per-request hash to the system prompt, so the KV prefix misses every turn. Unsloth measures the cost as "90% slower with local models". |
 
-## Why every model declares `[1m]`
+## The context window: set it exactly, per model
 
-Claude Code's context windows are **hardcoded** — the 2.1.220 binary contains exactly two values,
-200,000 and 1,000,000. A gateway cannot advertise a window (tested: `max_input_tokens` in the
-discovery cache is parsed but ignored), and `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is a single
-process-wide value that cannot be right for several models at once.
+**`CLAUDE_CODE_MAX_CONTEXT_TOKENS` sets the believed context window to any arbitrary value.** It is
+undocumented — absent from the model-configuration docs — but present and functional in 2.1.220.
+Measured, same bare model id, only the variable changed:
 
-So the approach is: declare 1M everywhere, let the **upstream** enforce the real limit — it knows
-it exactly — and show the truth in the status line. The trade is that Claude Code's own percentage
-and its proactive compaction become meaningless. All enforcement moves to the gateway.
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | Tokens | Status line | Believed window |
+|---|---|---|---|
+| unset | 26,836 | 13.0% | ~206k |
+| `262144` | 26,931 | 10.0% | **~269k** |
+| `393216` | 27,699 | 7.0% | **~396k** |
+
+This is the clean solution and it **supersedes the `[1m]` approach** described in earlier revisions of
+this document. Set the model's real window and everything downstream is simply correct:
+
+- Claude Code's own percentage is accurate, so `/context` and the built-in indicator can be trusted.
+- Auto-compaction fires at the right point with no `CLAUDE_CODE_AUTO_COMPACT_WINDOW` override, because
+  the documented clamp is "at most the model's context window" and the window is now truthful.
+- No fictional 1M declaration, so no overshoot risk and no need to cap the trigger by hand.
+- Honest model ids in the picker and status line, with no `[1m]` suffix.
+
+Earlier revisions concluded that per-model windows were impossible because the client hardcodes only
+200,000 and 1,000,000. That conclusion was **wrong** — it held for the model registry and for
+gateway discovery (`max_input_tokens` is parsed but ignored), but this variable overrides the result
+regardless.
+
+### The remaining limitation, and it is real
+
+The variable is **process-wide**, so it cannot differ between the main agent and its subagents. With a
+mixed-model session you must set it to the **smallest** real window in use:
+
+| Session | Set to | Why |
+|---|---|---|
+| GLM-5.2 only | `393216` | its real window |
+| GLM-5.2 + Qwen3.6-27B subagent | `262144` | Qwen's window is the binding constraint |
+| plus GLM-4.7-Flash | `202752` | smallest wins |
+| plus Kimi K3 (1M) later | still smallest | a larger model does not raise the floor |
+
+Set it too high for any participating model and that model overflows. This is where the proxy's
+reactive error normalisation still earns its place: it catches whatever the floor fails to prevent,
+using the real limit from the model that actually overflowed.
 
 ## Model notes
 
