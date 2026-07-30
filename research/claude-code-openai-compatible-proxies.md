@@ -90,11 +90,101 @@ forces full re-prefill every turn (SGLang #28906, measured at 99.0% of reminders
 bifrost #4592), while rendering it inline can leave the context ending on a system block and
 derail generation (#48874). Neither engine has a position that is right on both axes.
 
-**Practical consequence for recommendation #1:** the no-proxy path requires either pinning
-Claude Code to a version below the behaviour change (~2.1.150, plus `DISABLE_AUTOUPDATER=1`)
-or a vLLM build that hoists rather than renders positionally — and hoisting costs you the
-prefix cache. If neither is acceptable, **this is the specific case where a role-normalizing
-proxy earns its keep**, and it is the strongest argument in this document for using one.
+### Which of your models are exposed — measured, not guessed
+
+Reading vLLM's current source rather than the issue tracker shows the behaviour is **decided by
+your model's chat template**, and is therefore testable before you deploy anything.
+
+`vllm/entrypoints/anthropic/serving.py` (main, fetched 2026-07-30) sets
+`self._merge_inline_system = self._detect_merge_inline_system(chat_template)` at construction.
+That function is a Jinja render probe, verbatim docstring:
+
+> Renders a `[system, user, system, user]` conversation against the template; if it raises
+> (e.g. Qwen's `loop.first` guard), the model needs inline system messages merged into the
+> leading block.
+
+- **raises → `merge_inline_system=True`** → inline system messages are merged into the leading
+  system block → **#48874 cannot occur**.
+- **renders cleanly → `False`** → system messages stay in position → the prompt can end on a
+  system block → **#48874 occurs**.
+- no chat template at all → `True` (safe default).
+
+Running that exact probe against the real templates for the four deployed checkpoints:
+
+| Checkpoint | Probe result | `merge_inline_system` | Verdict |
+|---|---|---|---|
+| `Qwen/Qwen3.6-27B` | raises `UndefinedError` | `True` | **Safe** |
+| `moonshotai/Kimi-K3` | no `chat_template` field (engine-internal rendering) | `True` | **Safe** |
+| `zai-org/GLM-5.2-FP8` | renders cleanly | `False` | **Exposed** |
+| `google/gemma-4-31B-it` | renders cleanly | `False` | **Exposed** |
+
+For the two exposed templates, rendering the actual `[user, system]` shape Claude Code sends
+confirms the mechanism — the prompt ends on the agent-registry blob, not the user's task:
+
+```
+GLM-5.2-FP8:
+  [gMASK]<sop><|system|>Reasoning Effort: Max<|user|>USER_TASK_HERE<|system|>AGENT_REGISTRY_BLOB<|assistant|><think>
+
+gemma-4-31B-it:
+  <|turn>user\nUSER_TASK_HERE<turn|>\n<|turn>system\nAGENT_REGISTRY_BLOB<turn|>\n<|turn>model\n<|channel>thought
+```
+
+**This inverts the earlier per-model risk ranking.** #48874 was filed against
+`Qwen/Qwen3.6-35B-A3B-FP8`, which made Qwen3.6 look like the hazard — but the dense
+`Qwen3.6-27B` template *raises*, so it is protected, while **GLM-5.2-FP8, the intended main
+model, is the one exposed.** It also explains why Z.ai's benchmarks looked clean: they ran
+Claude Code 2.1.156/2.1.167, which predate the system-after-user shape entirely.
+
+Reproduce it in a minute against any checkpoint (`pip install jinja2`):
+
+```python
+import jinja2, jinja2.sandbox, jinja2.ext
+t = open("chat_template.jinja").read()          # or tokenizer_config.json["chat_template"]
+env = jinja2.sandbox.ImmutableSandboxedEnvironment(
+    trim_blocks=True, lstrip_blocks=True, extensions=[jinja2.ext.loopcontrols])
+try:
+    env.from_string(t).render(messages=[
+        {"role": "system", "content": "t"}, {"role": "user", "content": "t"},
+        {"role": "system", "content": "t"}, {"role": "user", "content": "t"}],
+        add_generation_prompt=False)
+    print("EXPOSED to #48874 (vLLM leaves inline system messages in place)")
+except jinja2.TemplateError as e:
+    print("SAFE (vLLM merges into leading block):", type(e).__name__)
+```
+
+### Fixing an exposed model
+
+The goal is to force `merge_inline_system = True`. Three options, cheapest first:
+
+1. **Serve a guarded chat template** via `--chat-template my_glm52.jinja` — a copy of the
+   model's template with a guard that raises on a mid-conversation `system` role. vLLM's probe
+   then returns `True` and merges automatically. No fork, no patch, and the change is a config
+   file you can commit.
+2. **Carry a one-line local patch** — force `self._merge_inline_system = True` in
+   `serving.py`. For scale reference, the adjacent role-normalization fix (PR #44737) is 15
+   lines in one file, so a local carry here is small and reviewable.
+3. **Put a role-normalizing proxy in front.** Heavier, but see the proxy comparison below.
+
+**The cost of merging, stated honestly:** the system reminder Claude Code rotates each turn
+lands in the *leading* block, so the cache prefix changes every turn and you get a full
+re-prefill — the exact regression SGLang #28906 was written to avoid. You are choosing between
+correct tool calling and prefix-cache reuse. Correctness wins; budget for the throughput hit.
+Partial mitigation: vLLM's `_extract_system_text` already strips the billing header, and
+`CLAUDE_CODE_ATTRIBUTION_HEADER: 0` removes the per-request hash, so what rotates is only the
+reminder content.
+
+**Also note:** PR #44737 is *not* a fix for #48874, despite being adjacent. It maps the
+non-standard `ctx` and `msg` roles to `user` so they pass Pydantic validation — that addresses
+the `400 invalid message role` class (cc-switch #3277), not positional rendering. `system` is
+already a valid role in `AnthropicMessage`. **No open PR addresses #48874**: nothing
+cross-references the issue, the only comment is a volunteer offering to investigate
+(2026-07-17), and the last commit to `vllm/entrypoints/anthropic/` is 2026-07-18 on an
+unrelated cache-token field.
+
+**Practical consequence for recommendation #1:** the no-proxy path is viable, but only after
+you check the template. Qwen3.6-27B and Kimi K3 work as-is. GLM-5.2-FP8 and gemma-4-31B need
+one of the three fixes above, or a Claude Code pinned below the behaviour change (~2.1.150,
+plus `DISABLE_AUTOUPDATER=1`).
 
 **Why this matters more than tool choice.** Every translating proxy converts
 Anthropic → OpenAI → Anthropic, and each hop is where the documented failures live: dropped
