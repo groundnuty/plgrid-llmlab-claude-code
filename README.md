@@ -11,16 +11,21 @@ Three launch profiles. Pick one per project; switch any time.
 | | `bin/claude-opus` | `bin/claude-glm` | `bin/claude-qwen` |
 |---|---|---|---|
 | **Runs your session** | Claude Opus 5, `xhigh` effort | GLM-5.2-FP8 | Qwen3.6-27B |
-| **Delegates to** | GLM-5.2 + Qwen3.6 subagents | any lab model | any lab model |
-| **Usable context** | 200k (see [limitation](#known-limitation-opus-reports-a-200k-window)) | **393k** — full | **262k** — full |
+| **Delegates to** | **any lab *or* Anthropic model** | any lab model | any lab model |
+| **Compacts at** | 200k ([why](#known-limitation-opus-compacts-at-200k)) | **393k** — full window | **262k** — full window |
 | **Costs** | your Claude subscription | grant compute only | grant compute only |
 | **Speed** | Opus latency + delegation | fastest (11s) | slower (50s) |
-| **Best for** | hard problems: strong reasoning plans it, lab models build it | day-to-day agentic coding | careful review passes |
+| **Best for** | hard problems: strong reasoning plans it, cheap models build it | day-to-day agentic coding | careful review passes |
 
 **`claude-opus` is the one to look at.** Claude Opus 5 orchestrates on your existing Claude
-subscription and delegates implementation to GLM-5.2 and Qwen3.6 as **native Claude Code subagents** —
-real subagents with their own context windows and tools, not tool calls or MCP shims. No API key, no
-impersonation. The expensive model does the thinking; grant compute does the volume.
+subscription and delegates to **native Claude Code subagents** — real subagents with their own
+context and tools, not tool calls or MCP shims. No API key, no impersonation.
+
+Subagents can be pinned to **anything the proxy serves**, mixed freely in one session: GLM-5.2 for
+bulk implementation, Qwen3.6-27B for review, and Claude Sonnet or Haiku where you want Anthropic
+quality on a narrow task. Verified in a single session — a `glm-5.2-fp8-393k` subagent and a
+`claude-haiku-4-5-20251001` subagent both returned correct results side by side. The expensive model
+does the thinking; grant compute does the volume.
 
 All three give you the full Claude Code experience against lab models: multi-turn agentic loops, tool
 use, auto-compaction, MCP servers, `--resume`, and a status line showing usage against each model's
@@ -105,9 +110,11 @@ for measurements and A/B evidence, and [Fork and releases](#fork-and-releases) b
 ## Opus orchestrating, lab models doing the work
 
 **The capability this repo exists for:** Claude Opus 5 at `xhigh` effort runs your session on your
-Claude subscription, and delegates implementation to GLM-5.2 and Qwen3.6 as **native Claude Code
-subagents** — real subagents with their own context and tools, not tool calls. No API key. No
-impersonation.
+Claude subscription, and delegates to **native Claude Code subagents** — real subagents with their
+own context and tools, not tool calls. No API key. No impersonation.
+
+Because one endpoint serves both providers, a subagent can be pinned to **any model the proxy
+serves** — lab or Anthropic — and they mix freely in one session.
 
 ```bash
 # once — OAuth against your subscription, token refreshes itself afterwards
@@ -120,15 +127,30 @@ cd <project> && /path/to/repo/bin/claude-opus
 ```
 
 `claude-opus` installs two subagents pinned to lab models: **`lab-coder`** (GLM-5.2 — implementation)
-and **`lab-reviewer`** (Qwen3.6-27B — correctness review). Ask Opus to use them by name.
+and **`lab-reviewer`** (Qwen3.6-27B — correctness review). Ask Opus to use them by name. Add your own
+by dropping a file in `.claude/agents/` with any alias `make status` lists:
 
-Verified on the wire, one session:
+```markdown
+---
+name: tricky-bit
+description: Narrow tasks where Anthropic quality is worth it.
+model: claude-haiku-4-5-20251001
+tools: Read, Glob, Grep
+---
+```
 
-| Inbound | → Upstream | Role | Status |
+Verified, one session:
+
+| Inbound | → Upstream | Role | Evidence |
 |---|---|---|---|
-| `claude-opus-5` | Anthropic (your subscription) | main | 200 |
-| `glm-5.2-fp8-393k` | `zai-org/GLM-5.2-FP8` | subagent | 200 |
-| `qwen3.6-27b-262k` | `Qwen/Qwen3.6-27B` | subagent | 200 |
+| `claude-opus-5` | Anthropic (your subscription) | main | wire, 200 |
+| `glm-5.2-fp8-393k` | `zai-org/GLM-5.2-FP8` | subagent | wire, 200 |
+| `qwen3.6-27b-262k` | `Qwen/Qwen3.6-27B` | subagent | wire, 200 |
+| `claude-haiku-4-5-20251001` | Anthropic | subagent | correct result in session |
+
+The last row was confirmed by the subagent returning a correct answer rather than by a request log —
+an unregistered alias fails closed with `502 unknown provider`, so resolving at all means it reached
+the Anthropic leg.
 
 ### Why the proxy is in the Anthropic path
 
@@ -150,30 +172,47 @@ could read the token file, and requests could be served by someone else's subscr
 lab-operated shared proxy is fine for the LLMLab leg — that is a lab-issued grant key — but must
 never hold subscription tokens.
 
-### Known limitation: Opus reports a 200k window
+### Known limitation: Opus compacts at 200k
 
-Behind any gateway, Claude Code cannot resolve registry context windows, so Opus shows **200k**
-instead of its true 1M. There is no fix. Exhaustively checked:
+Behind any gateway, Claude Code cannot resolve registry context windows, so it treats Opus as a 200k
+model. `/context` reports it directly:
+
+```
+Auto-compact window: 200k tokens
+```
+
+**This is not a setting we chose, and it cannot be raised.** `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is
+documented as clamped to "at most the model's context window" — and since the client believes that
+window is 200k, the setting clamps to itself. Measured, same session, only the variable changed:
+
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | Reported window |
+|---|---|
+| unset | 200k |
+| `1000000` | **200k** (silently clamped) |
+
+So the profile leaves it **unset** — not as a compromise, but because setting it changes nothing for
+Opus and would over-declare for lab subagents. Claude Code manages the main session natively, and
+subagents run against their own models without any imposed limit.
+
+Everything else was checked and is closed:
 
 | Mechanism | Per-model? |
 |---|---|
 | Model registry | hardcoded — two literals |
 | Gateway `/v1/models` | **no window field in the schema** |
 | Bootstrap `auto_compact_windows` | exists, first-party only — **tested, never requested behind a proxy** |
-| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | process-wide only |
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | process-wide, and clamped as above |
 | Agent frontmatter | no window field |
 
 `auto_compact_windows` is a genuine model→window map inside Claude Code — exactly the right
 mechanism — but it ships only over the first-party bootstrap endpoint, which is skipped for gateway
-sessions and requires a first-party credential the client does not have behind a proxy.
+sessions and needs a first-party credential the client does not have behind a proxy.
 
-`CLAUDE_CODE_MAX_CONTEXT_TOKENS` is therefore deliberately **unset** in this profile: it is
-process-wide, so any value is wrong for one side. The 200k default is **provably safe** — it sits
-below the smallest real window in the catalogue (`glm-4.7-flash`, 202,752), so no model can overflow.
-
-In practice this profile spends its context orchestrating and delegating rather than reading, so
-200k rarely binds. If you want full context on a lab model, use `bin/claude-glm` or `bin/claude-qwen`,
-which set the exact window per profile.
+**What this actually costs you.** 200k is the point where the session compacts, not a ceiling on the
+work — the session continues indefinitely through compaction. In this profile Opus spends its context
+planning and delegating rather than reading files, so 200k is rarely the binding constraint. If you
+want a full window on a lab model, use `bin/claude-glm` or `bin/claude-qwen`, which set the exact
+real window per profile.
 
 ## Repository layout
 
