@@ -10,6 +10,118 @@ anywhere as of 2026-07-30 — see `../research/claude-code-openai-compatible-pro
 
 ---
 
+## READ THIS FIRST — canonical configuration and known gaps
+
+This document grew as the work progressed and **the sections below it contain four different
+model-id schemes and three different `AUTO_COMPACT_WINDOW` values**, because each was the best
+answer at the time it was written. They are kept as a record of how the conclusions were reached.
+**The block in this section supersedes all of them.** Where a later section disagrees, this wins.
+
+### Canonical proxy config
+
+```yaml
+host: "127.0.0.1"
+port: 8317
+auth-dir: "~/.cli-proxy-api"
+request-log: true
+disable-cooling: true            # mandatory: see "disable-cooling is required"
+api-keys: ["local-test-key"]
+
+openai-compatibility:
+  - name: "plgrid"
+    base-url: "https://llmlab.plgrid.pl/api/v1"
+    api-key-entries:
+      - api-key: "<PLGRID_API_KEY>"
+    models:                       # real limit encoded in the alias, so it shows in the UI
+      - {name: "zai-org/GLM-5.2-FP8",   alias: "glm-5.2-fp8-393k"}
+      - {name: "Qwen/Qwen3.6-27B",      alias: "qwen3.6-27b-262k"}
+      - {name: "google/gemma-4-31B",    alias: "gemma-4-31b-262k"}
+      - {name: "zai-org/GLM-4.7-Flash", alias: "glm-4.7-flash-202k"}
+
+payload:                          # mandatory: PLGrid rejects reasoning_effort with a bare 422
+  filter:
+    - models: [{name: "*", protocol: "openai"}]
+      params: ["reasoning_effort"]
+```
+
+### Canonical project `.claude/settings.json`
+
+```json
+{
+  "permissions": {
+    "allow": ["Read","Glob","Grep","Edit","Write",
+              "Bash(python3:*)","Bash(echo:*)","Bash(ls:*)","Bash(cat:*)"],
+    "deny": ["Bash(rm:*)","Bash(git push:*)","Bash(curl:*)"]
+  },
+  "autoCompactEnabled": true,
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8317",
+    "ANTHROPIC_AUTH_TOKEN": "local-test-key",
+    "ANTHROPIC_MODEL": "glm-5.2-fp8-393k[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.2-fp8-393k[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2-fp8-393k[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-5.2-fp8-393k[1m]",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32768",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "DISABLE_AUTOUPDATER": "1"
+  }
+}
+```
+
+Verified through the real client: the status line reads `glm-5.2-fp8-393k[1m]`, the believed window
+is ~1M, and requests reach `zai-org/GLM-5.2-FP8`. Note `[1m]` is stripped by the client before the
+wire — the proxy must have the alias **without** the suffix, which is why a direct `curl` using
+`…-393k[1m]` returns `unknown provider`.
+
+### Correction: the compaction model must not be smaller than the primary
+
+Earlier sections recommend `ANTHROPIC_DEFAULT_HAIKU_MODEL=gemma-4-31b` to keep compaction off the
+expensive model. **For this gateway that is wrong, and the canonical block above deliberately does
+not do it.**
+
+Compaction runs on the haiku tier, and Anthropic's own docs state the principle: Claude Code
+"won't fall back to a model with a smaller context window than the primary's, since summarizing
+there would cut off part of the conversation first." Gemma-4-31B's real window is 262,144 while
+GLM-5.2's is 393,216 — so a conversation between those two sizes **cannot be summarised**: the
+compaction request itself overflows the summarising model. Worse, under the "declare `[1m]`
+everywhere" scheme Claude Code believes both are 1M, so its own guard never engages; it will try,
+and the upstream will reject.
+
+Two valid resolutions:
+
+- **Compact on the primary** (what the canonical block does): haiku = the same model. Compaction
+  always fits. Cost is GPU time on the large model for summarisation.
+- **Cap the primary to the compaction model's real window**: keep haiku = `gemma-4-31b-262k` and
+  add `"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "250000"`. The effective window becomes the *minimum* of
+  the two models, which is safe and cheaper, at the cost of ~140k of GLM-5.2's context.
+
+Pick the second if summarisation cost matters more than context length. Do not mix them.
+
+### What is *not* verified — read before relying on this
+
+| Claim | Status |
+|---|---|
+| Claude Code → proxy → PLGrid, multi-turn tool use, correct results | **verified**, repeatedly, incl. a real bug fix |
+| 6 of 6 reachable models complete an agentic loop | **verified** |
+| Subagents routed to different models | **verified** on the wire, with per-agent ids |
+| Named alias with encoded limit + `[1m]` displays and routes | **verified** |
+| `reasoning_effort` filter and `disable-cooling` are mandatory | **verified** by A/B |
+| Limits are client-hardcoded; a gateway cannot advertise them | **verified** two ways |
+| Error normalisation makes the client recognise the limit | **verified** by A/B |
+| **Auto-compaction actually recovering a long session** | **NOT observed.** Code path confirmed and its "cannot compact" branch seen firing, but no multi-turn recovery watched end to end |
+| Images, MCP tools, manual `/compact`, `--resume` behind the proxy | **untested** |
+| `availableModels` with non-`claude` ids | **untested** (verified only with `claude-*` ids) |
+
+### Operational gap: the fix is not installable
+
+The context-limit normalisation lives on a branch of a fork
+(`groundnuty/CLIProxyAPI@fix/normalize-vllm-context-limit-errors`), is **not merged upstream**, and
+has **no PR opened**. Using it today means building the binary from source with Go 1.26. Everything
+else here works on the stock 7.2.110 release; only the automatic-limit behaviour needs the branch.
+
+---
+
 ## Why a proxy is required here
 
 PLGrid Forge is a **hosted OpenAI-compatible gateway**. You do not control the serving stack,
