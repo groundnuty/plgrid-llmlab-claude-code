@@ -245,40 +245,57 @@ in local testing. `qwen3.6-27b-262k` as reviewer subagent — best coding number
 latency is irrelevant for a review pass. **Avoid** `glm-4.7-flash-202k`: it returned a wrong answer
 here, and publishes no tool-use benchmark at all.
 
-**The important caveat: the instruction-shortcutting we observed on GLM-5.2 is probably not the
-model.** Two documented gateway/serving bugs explain it without invoking any model weakness, and
-both apply to the Qwen fallbacks too:
+**On the instruction-shortcutting we observed on GLM-5.2 — corrected.** An earlier revision of this
+document cited [claude-code-router #1400](https://github.com/musistudio/claude-code-router/issues/1400)
+as a likely cause. **That citation was misapplied.** claude-code-router is a *different proxy* and is
+not installed here (no `ccr` binary, no `~/.claude-code-router`, absent from npm). We use
+**CLIProxyAPI**, and it does not have that defect:
+`internal/translator/openai/claude/openai_claude_request.go` emits a single unified assistant message
+carrying `content`, `reasoning_content` **and** `tool_calls` together, with the comment *"This avoids
+splitting into multiple assistant messages which breaks OpenAI tool-call adjacency"* — i.e. it
+implements exactly what #1400 reports CCR failing to do.
 
-- **[vLLM #42400](https://github.com/vllm-project/vllm/issues/42400)** — *"GLM-5.1 tool call parsing
-  fails intermittently when used as backend for Claude Code"*, with `--tool-call-parser glm47
-  --reasoning-parser glm45` and MTP enabled. Root-caused to two streaming parser bugs:
-  [#39757](https://github.com/vllm-project/vllm/issues/39757), where a tool name is silently
-  truncated (`get_weather` → `get`) in streaming but correct with `stream=False`; and #36857, where
-  arguments arrive only in the final chunk. Failures cluster near the context limit.
-- **[claude-code-router #1400](https://github.com/musistudio/claude-code-router/issues/1400)** — the
-  `thinking` field is not reliably mapped to `reasoning_content` on assistant tool-call turns. This
-  matters specifically for GLM: [Z.ai's docs](https://docs.z.ai/guides/capabilities/thinking-mode)
-  require that *"the complete, unmodified reasoning_content"* be returned, and thinking is on by
-  default. Unlike Kimi, GLM does not error — it proceeds without its own plan.
-  [#1397](https://github.com/musistudio/claude-code-router/issues/1397) documents the same class of
-  bug dropping tool-call argument deltas for Qwen3.6-35B-A3B, taking valid tool calls from 10/10 to
-  0/10.
+Verified on real traffic instead, across 40 request logs from the R4 session:
 
-Note these are reported against other proxies and vLLM directly; **we have not confirmed either in
-CLIProxyAPI against PLGrid.** Diagnose before switching model — in this order:
+| Observation | Count |
+|---|---|
+| Requests where Claude Code sent inbound `thinking` blocks | **0 / 40** |
+| Requests forwarding `reasoning_content` upstream | **0 / 40** |
+| `reasoning_content` in any PLGrid **response** | **0** |
+| Requests asking for thinking (`"thinking":{"type":"adaptive"}`) | all |
 
-1. Re-run a multi-step tool task **non-streaming** (#39757 vanishes at `stream=False`). Highest
-   information for one test; separates parser from model.
-2. Check whether the proxy round-trips `reasoning_content` on assistant tool-call messages.
+So the reasoning round-trip is not being broken by the proxy — **it never starts.** Claude Code asks
+for adaptive thinking on every request, PLGrid returns no `reasoning_content` at all, and with nothing
+returned there is nothing for the client to replay. The likely cause is server-side: PLGrid appears
+not to be running GLM-5.2 with `--reasoning-parser glm45`, so chain-of-thought is either suppressed or
+folded into `content` rather than surfaced as a separate field. **That is a question for the gateway
+operators**, and it is on the list in the performance report.
+
+Implication for model behaviour: GLM-5.2 is running effectively without exposed reasoning. Z.ai's
+[thinking-mode docs](https://docs.z.ai/guides/capabilities/thinking-mode) require *"the complete,
+unmodified reasoning_content"* be returned across turns, and thinking is on by default — so the model
+is being driven off its intended configuration. That remains a plausible contributor to shortcutting,
+but by a different mechanism than first reported, and one neither we nor the proxy can fix.
+
+The **streaming** hypothesis is still live and untested, and is the cheapest next check:
+[vLLM #39757](https://github.com/vllm-project/vllm/issues/39757) shows a GLM tool name silently
+truncated (`get_weather` → `get`) in streaming mode but correct with `stream=False`, and
+[#42400](https://github.com/vllm-project/vllm/issues/42400) reports that exact failure behind Claude
+Code with our parser pair. Those are vLLM-level, so they apply regardless of which proxy sits in
+front. Unconfirmed here.
+
+Ordered diagnostic, cheapest first:
+
+1. Re-run a multi-step tool task **non-streaming** — separates parser from model in one test.
+2. Ask the operators whether `--reasoning-parser glm45` is set; the evidence above suggests not.
 3. Keep `tool_choice` at `auto` — [vLLM #50399](https://github.com/vllm-project/vllm/issues/50399)
-   shows GLM-5.2-FP8 emitting ~127 duplicate tool calls under `"required"`.
+   shows GLM-5.2-FP8 emitting ~127 duplicate calls under `"required"`.
 4. Only then adjust sampling. No source attributes GLM shortcutting to temperature.
 
-Also worth passing to the PLGrid operators: the vLLM recipe states *"If you need tool calling and MTP
-at the same time, use the latest `main` branch"*, while its own recommended command enables both.
-And the vendor's Terminal-Bench 2.1 claim of 81.0 is worth discounting — the
-[official leaderboard](https://www.tbench.ai/leaderboard/terminal-bench/2.1) puts GLM-5.1 **in Claude
-Code** at 58.7%, below Z.ai's own harness numbers.
+Also for the operators: the vLLM recipe warns *"If you need tool calling and MTP at the same time, use
+the latest `main` branch"* while its own recommended command enables both. And discount the vendor's
+Terminal-Bench 2.1 claim of 81.0 — the [official leaderboard](https://www.tbench.ai/leaderboard/terminal-bench/2.1)
+puts GLM-5.1 **in Claude Code** at 58.7%.
 
 **Serving settings for the reviewer subagent** (from the Qwen3.6-27B card): temperature 0.6,
 top_p 0.95, top_k 20, min_p 0.0, presence_penalty 0.0 — the "precise coding" preset. Note the
