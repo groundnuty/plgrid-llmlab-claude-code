@@ -108,32 +108,36 @@ emits `prompt is too long: 66511 tokens > 32768 maximum (…)`, which the client
 and its "cannot compact" branch was seen firing correctly, but no multi-turn recovery has been
 watched end to end. Treat automatic recovery as expected-but-unproven.
 
-## R3 result: behaviour at the context limit, measured
+## R3 — behaviour at the context limit: PASSES
 
-Tested against Bielik-11B (real window 32,768) so the limit was reachable in seconds, with
-`autoCompactEnabled: true` confirmed on via `/config`, through the **patched** proxy.
+### Auto-compaction fires and recovers (GLM-5.2, real headroom)
 
-**With auto-compact on, Claude Code reports cleanly rather than leaking an upstream error:**
+Tested on `glm-5.2-fp8-393k[1m]` (real window 393,216) with the trigger set low
+(`CLAUDE_CODE_AUTO_COMPACT_WINDOW: "110000"`) so there was both ample history to summarise and
+ample headroom for the summarising request itself. Context was filled by reading ~89KB data files
+one at a time.
 
-```
-⎿  Context limit reached · /compact or /clear to continue
-```
-
-The proxy log shows a `400` at 15:05:50 immediately followed by a `200`, so the overflow was
-detected and the client acted on it. This is Claude Code's own message, not raw JSON — which is
-what the error-normalisation patch buys. Compare the stock proxy on the same condition:
-`API Error: 400 {"detail": "'max_tokens' or 'max_completion_tokens' is too large…"}`.
-
-**But automatic recovery did not happen, and manual `/compact` also failed:**
+Observed, in order:
 
 ```
-⎿  Compaction failed · conversation could not be reduced below the context limit
+3% until auto-compact                 <- client counts down against the trigger
+✽ Compacting conversation… (9s)       <- fires automatically
+0.0k/393k ░░░░░░░░░░░ 0%             <- context reclaimed
+65.0k/393k ███░░░░░░░░ 17%           <- session continues normally afterwards
 ```
 
-### Why, and what it means
+A follow-up prompt after compaction was answered normally. **Auto-compaction works end to end on a
+model with adequate context.** This is the requirement, and it is met.
 
-This is structural, not a test artifact. **Claude Code's own baseline does not fit in a small
-window.** Measured with minimal tools (`Read` only), a fresh config dir, and no MCP:
+### The failure mode on small-window models, and the floor it implies
+
+The same test on Bielik-11B (real window 32,768) produced Claude Code's own clean message —
+`Context limit reached · /compact or /clear to continue` rather than raw upstream JSON, which is
+what the error-normalisation patch buys — but recovery failed, and manual `/compact` also failed
+with `conversation could not be reduced below the context limit`.
+
+That is correct behaviour, not a defect. **Claude Code's baseline does not fit in a small window.**
+Measured with only the `Read` tool, a fresh config dir, and no MCP:
 
 | Component | Tokens |
 |---|---|
@@ -142,19 +146,52 @@ window.** Measured with minimal tools (`Read` only), a fresh config dir, and no 
 | Skills | 1.5k |
 | **Irreducible baseline** | **~19k** |
 
-Compaction can only shrink *conversation history*; the system prompt, tool definitions and skills
-are re-sent every turn and survive it. So on a 32k model, ~19k is unreclaimable and compaction has
-under 14k to work with — it cannot get below the limit, exactly as the message says.
+Compaction shrinks conversation history only; system prompt, tool definitions and skills are
+re-sent every turn and survive it. On a 32k model ~19k is unreclaimable, leaving under 14k to work
+with.
 
-**Consequence for model choice: a model needs roughly ≥64k of real context to be usable in Claude
-Code at all**, and comfortably more for real work. Bielik-11B at 32k is not a viable Claude Code
-model regardless of proxy configuration. Every model in the table above (202k minimum) is far
-above this floor, so this does not affect the recommended setup — it is a lower bound worth knowing
-before adding a small model.
+**Implication: a model needs roughly ≥64k real context to work in Claude Code at all**, and more
+for real tasks. Every model in the table above (202k minimum) clears this comfortably. Bielik-11B
+is not viable as a Claude Code model at any proxy setting.
 
-**Still unproven:** automatic compaction *succeeding* on a model with enough headroom. The failure
-above is the documented and correct behaviour for an over-constrained window, so it does not
-disconfirm the mechanism, but it does not confirm it either.
+## R4 — one model driving, two subagents on different models: PASSES
+
+Primary `glm-5.2-fp8-393k[1m]`, with two subagents pinned by frontmatter, each auditing a
+different file containing a different real bug:
+
+```markdown
+---
+name: parser-auditor
+model: qwen3.6-27b-262k
+tools: Read
+---
+```
+
+Both bugs were found and correctly diagnosed — the exclusive upper bound in `range(int(lo), int(hi))`
+and the integer division in `sum(xs) // len(xs)`. Wire-level routing from the proxy log:
+
+| Inbound alias | → Upstream model | Agent id | Status |
+|---|---|---|---|
+| `glm-5.2-fp8-393k` | `zai-org/GLM-5.2-FP8` | MAIN | 200 |
+| `qwen3.6-27b-262k` | `Qwen/Qwen3.6-27B` | `3609017b` | 200 |
+| `gemma-4-31b-262k` | `google/gemma-4-31B` | `12bee177` | 200 |
+
+Three models, three distinct upstreams, one session, with per-agent ids for attribution.
+
+**Two prerequisites, both learned by failing first.** The `Task` tool must be allow-listed
+(`"Task"`, or `"Task(<agent-name>)"` per agent) or dispatch is refused. And auto mode's classifier
+is unavailable for these models, so launch with `--permission-mode acceptEdits` (or `default`);
+otherwise subagent dispatch fails with `parser-auditor denied by auto mode · Classifier
+unavailable`. Neither needs `--dangerously-skip-permissions`.
+
+**The first R4 attempt failed for an instructive reason:** every subagent request returned `502
+unknown provider for model qwen3.6-27b-262k`, because the running proxy had been configured with
+the bare alias `qwen3.6-27b` while the settings referenced `qwen3.6-27b-262k`. The aliases in the
+proxy config and in `ANTHROPIC_DEFAULT_*` / agent frontmatter must match exactly. Check with:
+
+```bash
+curl -s -H "Authorization: Bearer local-test-key" http://127.0.0.1:8317/v1/models | jq -r '.data[].id'
+```
 
 ## Compaction model sizing — important
 
