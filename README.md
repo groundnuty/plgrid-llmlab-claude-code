@@ -6,26 +6,36 @@ instead of Anthropic's models or **alongside them in the same session**.
 
 ## What you get
 
-Three launch profiles. Pick one per project; switch any time.
+Four launch profiles. Pick one per project; switch any time.
 
-| | `bin/claude-opus` | `bin/claude-glm` | `bin/claude-qwen` |
-|---|---|---|---|
-| **Runs your session** | Claude Opus 5, `xhigh` effort | GLM-5.2-FP8 | Qwen3.6-27B |
-| **Delegates to** | **any lab *or* Anthropic model** | any lab model | any lab model |
-| **Context window** | **1M** — Opus 5 native | **393k** — full window | **262k** — full window |
-| **Costs** | your Claude subscription | grant compute only | grant compute only |
-| **Speed** | Opus latency + delegation | fastest (11s) | slower (50s) |
-| **Best for** | hard problems: strong reasoning plans it, cheap models build it | day-to-day agentic coding | careful review passes |
+| | `bin/claude-all` | `bin/claude-opus` | `bin/claude-glm` | `bin/claude-qwen` |
+|---|---|---|---|---|
+| **Runs your session** | Claude Opus 5, `xhigh` effort | Claude Opus 5, `xhigh` effort | GLM-5.2-FP8 | Qwen3.6-27B |
+| **Delegates to** | **Anthropic + OpenAI + lab** | Anthropic + lab | any lab model | any lab model |
+| **Context window** | **1M** — Opus 5 native | **1M** — Opus 5 native | **393k** — full window | **262k** — full window |
+| **Costs** | Claude **+** ChatGPT subscriptions | your Claude subscription | grant compute only | grant compute only |
+| **Speed** | Opus latency + delegation | Opus latency + delegation | fastest (11s) | slower (50s) |
+| **Best for** | cross-model work: plan, build, and get a second opinion | hard problems: strong reasoning plans it, cheap models build it | day-to-day agentic coding | careful review passes |
 
-**`claude-opus` is the one to look at.** Claude Opus 5 orchestrates on your existing Claude
-subscription and delegates to **native Claude Code subagents** — real subagents with their own
-context and tools, not tool calls or MCP shims. No API key, no impersonation.
+**`claude-all` is the one to look at.** Claude Opus 5 orchestrates at its full 1M context and
+delegates to **native Claude Code subagents** — real subagents with their own context and tools, not
+tool calls or MCP shims — spanning **three providers at once**. Verified on the wire in a single
+session:
 
-Subagents can be pinned to **anything the proxy serves**, mixed freely in one session: GLM-5.2 for
-bulk implementation, Qwen3.6-27B for review, and Claude Sonnet or Haiku where you want Anthropic
-quality on a narrow task. Verified in a single session — a `glm-5.2-fp8-393k` subagent and a
-`claude-haiku-4-5-20251001` subagent both returned correct results side by side. The expensive model
-does the thinking; grant compute does the volume.
+```
+claude-opus-5      -> Anthropic             18 × 200     main, your Claude subscription
+gpt-5.6-sol        -> OpenAI                 3 × 200     subagent, your ChatGPT subscription
+glm-5.2-fp8-393k   -> zai-org/GLM-5.2-FP8    9 × 200     subagent, grant compute
+claude-haiku-4-5   -> Anthropic              1 × 200     subagent
+```
+
+**No API keys and no cloaking** — both subscription legs run with their disguise features explicitly
+disabled (`disable-claude-cloak-mode: true`, `codex.disable-codex-cloaking: true`) and both return
+200 as themselves. Subscriptions you already pay for, used by their own clients.
+
+The pattern that makes it worth it: the expensive model plans and reviews, a second frontier model
+from a different lab gives an independent read, and grant compute does the bulk. `claude-opus` is
+the same thing without the OpenAI leg, if you only have the one subscription.
 
 All three give you the full Claude Code experience against lab models: multi-turn agentic loops, tool
 use, auto-compaction, MCP servers, `--resume`, and a status line showing usage against each model's
@@ -60,8 +70,9 @@ Then, from any project directory, pick a profile:
 /path/to/plgrid-llmlab-claude-code/bin/claude-qwen    # Qwen3.6-27B drives   (262k context)
 ```
 
-For `bin/claude-opus` — Opus orchestrating lab subagents — use the Opus proxy config and log in once
-against your subscription first; see [that section](#opus-orchestrating-lab-models-doing-the-work).
+For `bin/claude-all` or `bin/claude-opus` — Opus orchestrating subagents across providers — use the
+corresponding proxy config and log in once per subscription first; see
+[that section](#opus-orchestrating-across-providers).
 
 Each script installs `.claude/settings.json`, `.claude/statusline.sh` (and for `claude-opus`, the lab
 subagents) into the current project on first run, never overwriting anything that already exists. It
@@ -107,50 +118,66 @@ Two fixes are needed on top of the upstream release, both on our fork and both v
 See [`deliverables/plgrid-setup-reference.md`](deliverables/plgrid-setup-reference.md#required-fixes)
 for measurements and A/B evidence, and [Fork and releases](#fork-and-releases) below.
 
-## Opus orchestrating, lab models doing the work
+## Opus orchestrating across providers
 
 **The capability this repo exists for:** Claude Opus 5 at `xhigh` effort with its **full 1M context**
-runs your session on your Claude subscription, and delegates to **native Claude Code subagents** —
-real subagents with their own context and tools, not tool calls. No API key. No impersonation.
-
-Because one endpoint serves both providers, a subagent can be pinned to **any model the proxy
-serves** — lab or Anthropic — and they mix freely in one session.
+runs your session, and delegates to **native Claude Code subagents** pinned to models from three
+different providers — real subagents with their own context and tools, not tool calls.
 
 ```bash
-# once — OAuth against your subscription, token refreshes itself afterwards
-cp config/cli-proxy-api.opus.yaml ~/.cli-proxy-api/config.yaml
-$EDITOR ~/.cli-proxy-api/config.yaml          # add PLGRID_API_KEY only
+# once — OAuth against subscriptions you already pay for. No API keys.
+cp config/cli-proxy-api.all.yaml ~/.cli-proxy-api/config.yaml
+$EDITOR ~/.cli-proxy-api/config.yaml                        # add PLGRID_API_KEY only
 ./cli-proxy-api --config ~/.cli-proxy-api/config.yaml --claude-login
+./cli-proxy-api --config ~/.cli-proxy-api/config.yaml --codex-login
 
 make proxy
-cd <project> && /path/to/repo/bin/claude-opus
+cd <project> && /path/to/repo/bin/claude-all
 ```
 
-`claude-opus` installs two subagents pinned to lab models: **`lab-coder`** (GLM-5.2 — implementation)
-and **`lab-reviewer`** (Qwen3.6-27B — correctness review). Ask Opus to use them by name. Add your own
-by dropping a file in `.claude/agents/` with any alias `make status` lists:
+If Codex CLI is already logged in, its token in `~/.codex/auth.json` carries the same fields the
+proxy expects and can be reused instead of a second grant.
+
+Three subagents install on first run — **`lab-coder`** (GLM-5.2, implementation), **`lab-reviewer`**
+(Qwen3.6-27B, correctness), **`gpt-analyst`** (`gpt-5.6-sol`, independent second opinion). Ask Opus
+to use them by name. Add your own with any alias `make status` lists:
 
 ```markdown
 ---
 name: tricky-bit
-description: Narrow tasks where Anthropic quality is worth it.
-model: claude-haiku-4-5-20251001
+description: Narrow tasks worth a different model.
+model: gpt-5.6-terra
 tools: Read, Glob, Grep
 ---
 ```
 
-Verified, one session:
+Verified on the wire, one session, all three providers concurrently:
 
-| Inbound | → Upstream | Role | Evidence |
+| Inbound | → Upstream | Role | Status |
 |---|---|---|---|
-| `claude-opus-5[1m]` | Anthropic (your subscription) | main, 1M window | wire, 200 |
-| `glm-5.2-fp8-393k` | `zai-org/GLM-5.2-FP8` | subagent | wire, 200 |
-| `qwen3.6-27b-262k` | `Qwen/Qwen3.6-27B` | subagent | wire, 200 |
-| `claude-haiku-4-5-20251001` | Anthropic | subagent | correct result in session |
+| `claude-opus-5[1m]` | Anthropic — Claude subscription | main, 1M window | 18 × 200 |
+| `gpt-5.6-sol` | OpenAI — ChatGPT subscription | subagent | 3 × 200 |
+| `glm-5.2-fp8-393k` | `zai-org/GLM-5.2-FP8` — grant | subagent | 9 × 200 |
+| `claude-haiku-4-5-20251001` | Anthropic | subagent | 1 × 200 |
 
-The last row was confirmed by the subagent returning a correct answer rather than by a request log —
-an unregistered alias fails closed with `502 unknown provider`, so resolving at all means it reached
-the Anthropic leg.
+`bin/claude-opus` is the same profile without the OpenAI leg.
+
+### Neither subscription leg is cloaked
+
+Both providers are reached with their disguise features explicitly **off**:
+
+```yaml
+disable-claude-cloak-mode: true
+codex:
+  disable-codex-cloaking: true
+  identity-confuse: false
+```
+
+Those settings suppress the forced Claude Code and Codex identity headers
+(`if !cfg.Codex.DisableCodexCloaking { set User-Agent, Originator }`). Both were tested with the
+disguise off before being adopted: Claude Code returns 200 as itself, and `gpt-5.6-sol`,
+`gpt-5.6-terra`, `gpt-5.5` and `gpt-5.4-mini` all answer with no forced headers. The proxy is a
+relay, not a costume.
 
 ### Why the proxy is in the Anthropic path
 
@@ -209,7 +236,7 @@ only — never requested behind a proxy).
 
 | Path | Contents |
 |---|---|
-| `bin/` | `claude-opus`, `claude-glm`, `claude-qwen` — launch with a model profile |
+| `bin/` | `claude-all`, `claude-opus`, `claude-glm`, `claude-qwen` — launch with a profile |
 | `config/` | proxy configs, per-profile Claude Code settings, status line, lab subagents |
 | `Makefile` | proxy lifecycle |
 | `deliverables/` | the reference manual, gateway performance report, investigation record |

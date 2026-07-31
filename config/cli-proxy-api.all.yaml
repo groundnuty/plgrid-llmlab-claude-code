@@ -1,0 +1,67 @@
+# All three providers through one endpoint: Anthropic + OpenAI + PLGrid LLMLab.
+#
+# Claude Code has no per-agent provider routing and ANTHROPIC_BASE_URL is a single
+# global, so one endpoint must serve everything and route by model name.
+#
+# Setup, once each — both use OAuth against subscriptions you already pay for.
+# Neither needs an API key, and neither stores anything you paste here:
+#   cli-proxy-api --config <this file> --claude-login
+#   cli-proxy-api --config <this file> --codex-login
+#
+# If Codex CLI is already logged in, its token in ~/.codex/auth.json carries the
+# same fields the proxy expects and can be reused instead of a second grant.
+#
+# THIS PROXY MUST STAY LOCAL AND SINGLE-USER.
+# auth-dir holds access_token AND refresh_token in plaintext, and credentials are
+# pooled round-robin across every logged-in account. On a shared host other users
+# could read the token files, or have their requests served by your subscription.
+# Bind to 127.0.0.1 and never run this instance for a team.
+#
+# Use with config/claude-settings.all.json.
+host: "127.0.0.1"
+port: 8317
+auth-dir: "~/.cli-proxy-api"
+request-log: true
+disable-cooling: true
+
+# No disguise on either subscription leg. Both were verified working with these
+# off: Claude Code returns 200 as itself, and gpt-5.6-sol / gpt-5.6-terra /
+# gpt-5.5 / gpt-5.4-mini all answer with no forced Codex identity headers.
+disable-claude-cloak-mode: true
+codex:
+  disable-codex-cloaking: true
+  identity-confuse: false
+
+api-keys:
+  - "local-test-key"
+
+# Anthropic and OpenAI models come from the OAuth credentials in auth-dir.
+# No claude-api-key or codex-api-key block: this setup uses no paid API key.
+
+openai-compatibility:
+  - name: "plgrid"
+    base-url: "https://llmlab.plgrid.pl/api/v1"
+    api-key-entries:
+      - api-key: "PLGRID_API_KEY"
+    models:
+      - name: "zai-org/GLM-5.2-FP8"
+        alias: "glm-5.2-fp8-393k"
+      - name: "Qwen/Qwen3.6-27B"
+        alias: "qwen3.6-27b-262k"
+      - name: "Qwen/Qwen3.6-35B-A3B"
+        alias: "qwen3.6-35b-a3b-262k"
+      - name: "google/gemma-4-31B"
+        alias: "gemma-4-31b-262k"
+      - name: "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+        alias: "qwen3-coder-30b-249k"
+      - name: "Qwen/Qwen3-VL-8B-Instruct"
+        alias: "qwen3-vl-8b-262k"
+
+# Applies only to the PLGrid leg; Anthropic and OpenAI are untouched passthrough.
+payload:
+  filter:
+    - models:
+        - name: "*"
+          protocol: "openai"
+      params:
+        - "reasoning_effort"

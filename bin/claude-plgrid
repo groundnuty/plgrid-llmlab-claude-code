@@ -3,6 +3,7 @@
 #   claude-plgrid glm    [args...]  GLM-5.2-FP8 primary   (393k window)
 #   claude-plgrid qwen   [args...]  Qwen3.6-27B primary   (262k window)
 #   claude-plgrid opus   [args...]  Opus orchestrates, GLM/Qwen as native subagents
+#   claude-plgrid all    [args...]  Opus orchestrates Anthropic + OpenAI + lab subagents
 # Any extra arguments are passed through to `claude`.
 set -euo pipefail
 
@@ -13,6 +14,7 @@ case "$(basename "$0")" in
   claude-glm)    PROFILE=glm ;;
   claude-qwen)   PROFILE=qwen ;;
   claude-opus)   PROFILE=opus ;;
+  claude-all)    PROFILE=all ;;
   *)           PROFILE="${1:-glm}"; shift || true ;;
 esac
 
@@ -22,9 +24,12 @@ case "$PROFILE" in
   opus)
         SETTINGS="$REPO/config/claude-settings.opus.json"
         AGENTS="$REPO/config/agents" ;;
+  all)
+        SETTINGS="$REPO/config/claude-settings.all.json"
+        AGENTS="$REPO/config/agents" ;;
   -h|--help|help)
         sed -n '2,5p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-  *)    echo "unknown profile '$PROFILE' (expected: glm | qwen | opus)" >&2; exit 2 ;;
+  *)    echo "unknown profile '$PROFILE' (expected: glm | qwen | opus | all)" >&2; exit 2 ;;
 esac
 
 PORT="$(sed -n 's/^port: *//p' "$REPO/config/cli-proxy-api.yaml" | head -1)"
