@@ -12,7 +12,22 @@
       "Bash(cat:*)",
       "Bash(pytest:*)",
       "Bash(git status)",
-      "Bash(git diff:*)"
+      "Bash(git diff:*)",
+      "Bash(true)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(find:*)",
+      "Bash(sort:*)",
+      "Bash(uniq:*)",
+      "Bash(diff:*)",
+      "Bash(file:*)",
+      "Bash(stat:*)",
+      "Bash(which:*)",
+      "Bash(pwd)",
+      "Bash(git log:*)"
     ],
     "deny": [
       "Bash(rm:*)",
