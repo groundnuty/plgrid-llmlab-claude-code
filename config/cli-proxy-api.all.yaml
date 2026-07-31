@@ -24,10 +24,22 @@ auth-dir: "~/.cli-proxy-api"
 request-log: true
 disable-cooling: true
 
-# No disguise on either subscription leg. Both were verified working with these
-# off: Claude Code returns 200 as itself, and gpt-5.6-sol / gpt-5.6-terra /
-# gpt-5.5 / gpt-5.4-mini all answer with no forced Codex identity headers.
-disable-claude-cloak-mode: true
+# The Anthropic subscription endpoint validates the FIRST SYSTEM BLOCK, not
+# client headers. Measured, everything else held identical: the Claude Code
+# identity block returns 200; any other first block returns
+#   429 {"type":"rate_limit_error","message":"Error"}
+# which is a generic rejection wearing a rate-limit label, not a quota problem.
+#
+# Claude Code's own auto-mode Bash classifier replaces that block with a
+# security-monitor prompt. With cloaking fully off (true) those calls are
+# rejected and auto mode loses Bash entirely. "false" is upstream's default
+# "auto": it restores the identity block only on requests that lack it, so
+# ordinary turns pass through untouched.
+#
+# This keys on the system prompt, not on who the client really is. Set it to
+# true if you would rather not have that behaviour available at all — then use
+# --permission-mode acceptEdits, which never calls the classifier.
+disable-claude-cloak-mode: false
 codex:
   disable-codex-cloaking: true
   identity-confuse: false

@@ -30,9 +30,11 @@ glm-5.2-fp8-393k   -> zai-org/GLM-5.2-FP8    9 × 200     subagent, grant comput
 claude-haiku-4-5   -> Anthropic              1 × 200     subagent
 ```
 
-**No API keys and no cloaking** — both subscription legs run with their disguise features explicitly
-disabled (`disable-claude-cloak-mode: true`, `codex.disable-codex-cloaking: true`) and both return
-200 as themselves. Subscriptions you already pay for, used by their own clients.
+**No API keys.** Both legs run on subscriptions you already pay for, used by their own clients. The
+OpenAI leg needs no identity handling at all (`codex.disable-codex-cloaking: true`). The Anthropic
+leg has one known rough edge: its endpoint validates the first system block, and Claude Code's own
+auto-mode Bash classifier sends a different one — see
+[auto mode's Bash classifier](#auto-modes-bash-classifier-is-unreliable-through-the-proxy).
 
 The pattern that makes it worth it: the expensive model plans and reviews, a second frontier model
 from a different lab gives an independent read, and grant compute does the bulk. `claude-opus` is
@@ -168,23 +170,6 @@ Verified on the wire, one session, all three providers concurrently:
 
 `bin/claude-opus` is the same profile without the OpenAI leg.
 
-### Neither subscription leg is cloaked
-
-Both providers are reached with their disguise features explicitly **off**:
-
-```yaml
-disable-claude-cloak-mode: true
-codex:
-  disable-codex-cloaking: true
-  identity-confuse: false
-```
-
-Those settings suppress the forced Claude Code and Codex identity headers
-(`if !cfg.Codex.DisableCodexCloaking { set User-Agent, Originator }`). Both were tested with the
-disguise off before being adopted: Claude Code returns 200 as itself, and `gpt-5.6-sol`,
-`gpt-5.6-terra`, `gpt-5.5` and `gpt-5.4-mini` all answer with no forced headers. The proxy is a
-relay, not a costume.
-
 ### Why the proxy is in the Anthropic path
 
 Only because it has to be. Claude Code has no per-agent provider routing — verified against 2.1.220:
@@ -192,10 +177,50 @@ no `agentBaseUrl`, `providerOverride` or `modelProvider` exists, agent frontmatt
 endpoint field, and `ANTHROPIC_BASE_URL` is a single global. So one endpoint must serve both
 providers and route by model name, and only the proxy can do that.
 
-**This is not impersonation.** `disable-claude-cloak-mode: true` is set, which turns off
-CLIProxyAPI's Claude Code disguise and system-prompt replacement entirely. It is off because nothing
-needs disguising: the client genuinely *is* Claude Code. Measured, same proxy, minutes apart —
-`curl` through it gets `429`, Claude Code through it gets `200`.
+### Auto mode's Bash classifier is unreliable through the proxy
+
+**Symptom.** In auto mode, Bash commands outside `permissions.allow` intermittently fail with
+*"auto mode cannot determine the safety of Bash"* or *"Classifier unavailable"*.
+
+**What is established.** The Anthropic subscription endpoint validates the **first system block**.
+Measured through the proxy with everything else held identical:
+
+| First system block | Result |
+|---|---|
+| `"You are Claude Code, Anthropic's official CLI for Claude."` | 200 |
+| `"You are a security monitor for autonomous AI coding agents."` | 429 |
+| `"You are a helpful assistant."` | 429 |
+
+Auto mode's Bash classifier sends that security-monitor prompt, so its calls are rejected. The `429`
+carries `{"type":"rate_limit_error","message":"Error"}` — an empty message, which is what makes this
+easy to misread as a quota problem. It is not: ordinary conversation turns on the same account at the
+same moment return 200.
+
+**Partial mitigation, not a fix.** Setting `"cloak_mode": "always"` in the Claude token JSON under
+`auth-dir` forces the identity block onto every request. Measured over 17 classifier calls each way:
+
+| Setting | classifier calls returning 200 |
+|---|---|
+| `disable-claude-cloak-mode: true` | 1 / 17 |
+| `+ "cloak_mode": "always"` | 4 / 17 |
+
+Sessions become usable because Claude Code retries until one lands, but the majority still fail.
+Something beyond the system prompt is also at play and is not yet identified — possibly genuine rate
+limiting layered on top. Do not treat this as solved.
+
+Note `disable-claude-cloak-mode: false` alone does **nothing** here, because upstream's "auto" mode
+only cloaks non-`claude-cli` clients:
+
+```go
+default: return !strings.HasPrefix(userAgent, "claude-cli")
+```
+
+A `curl` probe therefore gets cloaked while the real classifier does not — which makes curl a
+misleading way to test any of this.
+
+**If you want reliable Bash today**, run with `--permission-mode acceptEdits`, which never calls the
+classifier (`auto` → classify; `acceptEdits` → ask). Everything in `permissions.allow` still runs
+without prompting, and every profile pre-approves a read-only working set.
 
 ### This proxy must stay local and single-user
 

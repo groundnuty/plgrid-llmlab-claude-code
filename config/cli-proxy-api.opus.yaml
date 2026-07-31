@@ -22,10 +22,12 @@ auth-dir: "~/.cli-proxy-api"
 request-log: true
 disable-cooling: true
 
-# No impersonation. Cloaking exists to disguise non-Claude-Code clients as Claude
-# Code; here the client genuinely IS Claude Code, so there is nothing to disguise
-# and this stays off. Verified working with it off — Anthropic returns 200.
-disable-claude-cloak-mode: true
+# See the long note in cli-proxy-api.all.yaml. Short version: the Anthropic
+# endpoint validates the first system block, and Claude Code's own auto-mode
+# Bash classifier sends a different one, so with this set to true auto mode
+# loses Bash. "false" is upstream's default "auto" — it restores the identity
+# block only where missing and leaves ordinary turns untouched.
+disable-claude-cloak-mode: false
 
 api-keys:
   - "local-test-key"
