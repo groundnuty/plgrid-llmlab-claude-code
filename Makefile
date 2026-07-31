@@ -7,6 +7,16 @@ VERSION  := v7.2.110-plgrid.1
 SRC      := $(REPO)/.cli-proxy-api/src
 BIN      := $(REPO)/.cli-proxy-api/cli-proxy-api
 CONFIG   := $(REPO)/config/cli-proxy-api.local.yaml
+# Which profile's proxy template `make config` starts from:
+#   lab (default) = LLMLab only        -> claude-glm / claude-qwen
+#   opus          = + Claude sub       -> claude-opus
+#   all           = + Claude & ChatGPT -> claude-all
+PROFILE  ?= lab
+ifeq ($(PROFILE),lab)
+TEMPLATE := config/cli-proxy-api.yaml
+else
+TEMPLATE := config/cli-proxy-api.$(PROFILE).yaml
+endif
 PORT     := $(shell sed -n 's/^port: *//p' config/cli-proxy-api.yaml | head -1)
 
 # Prebuilt binaries are published on the fork's releases; no Go toolchain needed.
@@ -15,11 +25,14 @@ ARCH     := $(shell uname -m | sed 's/^x86_64$$/amd64/; s/^aarch64$$/arm64/')
 TARBALL  := cli-proxy-api_$(VERSION)_$(OS)_$(ARCH).tar.gz
 URL      := $(FORK)/releases/download/$(VERSION)/$(TARBALL)
 
-.PHONY: help proxy build build-from-source config stop status logs test clean
+.PHONY: help proxy build build-from-source config login-claude login-codex stop status logs test clean
 .DEFAULT_GOAL := help
 
 help:
-	@echo "make config   create config/cli-proxy-api.local.yaml, then add your PLGrid key"
+	@echo "make config [PROFILE=lab|opus|all]   create config/cli-proxy-api.local.yaml"
+	@echo "                                     then add your PLGrid key"
+	@echo "make login-claude   OAuth against your Claude subscription   (opus, all)"
+	@echo "make login-codex    OAuth against your ChatGPT subscription  (all)"
 	@echo "make build    download the patched proxy $(VERSION) ($(OS)/$(ARCH))"
 	@echo "make build-from-source   build it instead (needs Go 1.26)"
 	@echo "make proxy    start the proxy (builds and configures if needed)"
@@ -28,12 +41,18 @@ help:
 	@echo "make logs     tail the proxy log"
 	@echo "make test     end-to-end check: proxy reachable + a real completion"
 	@echo ""
-	@echo "then:  ./bin/claude-glm     or    ./bin/claude-qwen"
+	@echo ""
+	@echo "then, from any project directory:"
+	@echo "  ./bin/claude-all    Opus + OpenAI + lab subagents   (PROFILE=all)"
+	@echo "  ./bin/claude-opus   Opus + lab subagents            (PROFILE=opus)"
+	@echo "  ./bin/claude-glm    GLM-5.2 drives                  (PROFILE=lab)"
+	@echo "  ./bin/claude-qwen   Qwen3.6-27B drives              (PROFILE=lab)"
 
 $(CONFIG):
-	@cp config/cli-proxy-api.yaml $(CONFIG)
+	@test -f $(TEMPLATE) || { echo "no template $(TEMPLATE) (PROFILE=lab|opus|all)"; exit 1; }
+	@cp $(TEMPLATE) $(CONFIG)
 	@chmod 600 $(CONFIG)
-	@echo "created $(CONFIG) (gitignored, mode 600)"
+	@echo "created $(CONFIG) from $(TEMPLATE) (gitignored, mode 600)"
 	@echo ">>> edit it and replace PLGRID_API_KEY with your grant key"
 	@echo ">>> get one at https://llmlab.plgrid.pl -> Grants -> Generate API Key"
 
@@ -67,6 +86,12 @@ proxy: $(BIN) $(CONFIG)
 	@nohup $(BIN) --config $(CONFIG) > .cli-proxy-api/proxy.log 2>&1 & echo $$! > .cli-proxy-api/pid
 	@sleep 4
 	@$(MAKE) --no-print-directory status
+
+login-claude: $(BIN) $(CONFIG)
+	@$(BIN) --config $(CONFIG) --claude-login
+
+login-codex: $(BIN) $(CONFIG)
+	@$(BIN) --config $(CONFIG) --codex-login
 
 status:
 	@curl -fsS -m 5 -H "Authorization: Bearer local-test-key" \

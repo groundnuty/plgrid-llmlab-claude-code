@@ -93,7 +93,8 @@ That is usage against the model's **real** context window, with a warning past 8
 
 | Target | Does |
 |---|---|
-| `make config` | create the local proxy config from the template |
+| `make config [PROFILE=lab\|opus\|all]` | create the local proxy config from a profile template |
+| `make login-claude` / `make login-codex` | OAuth against each subscription (opus, all) |
 | `make build` | download the prebuilt proxy for your platform, checksum-verified |
 | `make build-from-source` | build it instead (needs Go 1.26) |
 | `make proxy` | start it (builds and configures if needed) |
@@ -126,14 +127,18 @@ runs your session, and delegates to **native Claude Code subagents** pinned to m
 different providers — real subagents with their own context and tools, not tool calls.
 
 ```bash
-# once — OAuth against subscriptions you already pay for. No API keys.
-cp config/cli-proxy-api.all.yaml ~/.cli-proxy-api/config.yaml
-$EDITOR ~/.cli-proxy-api/config.yaml                        # add PLGRID_API_KEY only
-./cli-proxy-api --config ~/.cli-proxy-api/config.yaml --claude-login
-./cli-proxy-api --config ~/.cli-proxy-api/config.yaml --codex-login
+make build                      # downloads the proxy binary; no Go needed
+make config PROFILE=all         # writes config/cli-proxy-api.local.yaml (gitignored, 600)
+$EDITOR config/cli-proxy-api.local.yaml     # replace PLGRID_API_KEY
 
-make proxy
-cd <project> && /path/to/repo/bin/claude-all
+make login-claude               # OAuth, your Claude subscription  — opens a browser
+make login-codex                # OAuth, your ChatGPT subscription — opens a browser
+
+make proxy                      # start it
+make status                     # expect claude-*, gpt-*, and the lab aliases
+
+cd <your project>
+/path/to/plgrid-llmlab-claude-code/bin/claude-all
 ```
 
 If Codex CLI is already logged in, its token in `~/.codex/auth.json` carries the same fields the
