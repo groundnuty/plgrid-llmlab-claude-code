@@ -177,6 +177,21 @@ no `agentBaseUrl`, `providerOverride` or `modelProvider` exists, agent frontmatt
 endpoint field, and `ANTHROPIC_BASE_URL` is a single global. So one endpoint must serve both
 providers and route by model name, and only the proxy can do that.
 
+### Which models get 1M
+
+The `[1m]` suffix is stripped client-side and converted to the `context-1m-2025-08-07` beta header.
+It is per-model, and not every model on the subscription accepts it — measured:
+
+| Model | `[1m]` | Result |
+|---|---|---|
+| `claude-opus-5` | yes | 200 |
+| `claude-sonnet-5` | yes | 200 |
+| `claude-haiku-4-5-20251001` | no | `400 The long context beta is not yet available for this subscription.` |
+
+So the profiles set `[1m]` on the Opus and Sonnet defaults and leave Haiku alone. A subagent
+dispatched with `model: sonnet` inherits `ANTHROPIC_DEFAULT_SONNET_MODEL`, so without the suffix it
+silently runs at 200k — visible in its status line as `200k`, not `1000k`.
+
 ### Auto mode's Bash classifier is unreliable through the proxy
 
 **Symptom.** In auto mode, Bash commands outside `permissions.allow` intermittently fail with

@@ -39,6 +39,15 @@ disable-claude-cloak-mode: false
 # unlike "always" which replaces the system array and relocates the caller's
 # prompt into the first user message.
 claude-cloak-mode: "prefix"
+# Trim the picker to models worth choosing. Without this the gateway serves 31,
+# most of them superseded Claude 4.x, image models that cannot drive a session,
+# and Codex-internal endpoints. Wildcards are exact / prefix* / *suffix / *sub*.
+oauth-excluded-models:
+  claude:
+    - "claude-3-*"              # superseded
+    - "claude-opus-4*"          # superseded by opus-5
+    - "claude-sonnet-4*"        # superseded by sonnet-5
+
 api-keys:
   - "local-test-key"
 
