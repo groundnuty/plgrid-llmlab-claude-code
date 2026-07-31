@@ -163,13 +163,19 @@ Add your own with any alias `make status` lists:
 name: gpt-5.6-terra
 description: Runs a task on GPT-5.6 Terra. No persona — the caller supplies the purpose.
 model: gpt-5.6-terra[1m]
-tools: Read, Glob, Grep, SendMessage
 ---
 
 You have no assigned role. Do exactly what the task asks and nothing more.
 ```
 
-**`SendMessage` is required**, or the agent finishes and then idles with its answer stranded.
+**There is no `tools:` key, deliberately.** With one, the agent gets only what it lists; without, it
+inherits everything — Bash, Write, Edit, SendMessage. Restricting tools is itself a kind of
+pre-framing, since it tells the agent what sort of thing it is before the task does. It also caused a
+real bug: an earlier set omitted `SendMessage`, so agents finished and then idled with the answer
+stranded. Measured cost of the full set is ~13k more context per dispatch (4.8k → 17.8k), about 7% of
+the smallest lab window. If you do add a `tools:` list, include `SendMessage` or the agent cannot
+report back.
+
 **`[1m]`** raises the window to 1M — measured, it works for gateway models too, not only Anthropic
 ones (`gpt-5.6-sol` reports `200k`, `gpt-5.6-sol[1m]` reports `1000k`), and it does not disturb the
 OpenAI leg. It sets what Claude Code *believes*, so only use it where the real window supports it.
