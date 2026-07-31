@@ -3,7 +3,7 @@
 
 REPO     := $(shell pwd)
 FORK     := https://github.com/groundnuty/CLIProxyAPI
-VERSION  := v7.2.110-plgrid.1
+VERSION  := v7.2.110-plgrid.2
 SRC      := $(REPO)/.cli-proxy-api/src
 BIN      := $(REPO)/.cli-proxy-api/cli-proxy-api
 CONFIG   := $(REPO)/config/cli-proxy-api.local.yaml

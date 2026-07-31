@@ -75,3 +75,6 @@ config/cli-proxy-api.local.yaml
 AGENTS.md
 CLAUDE.md
 .mcp.json.example
+
+# proxy runtime artifact (2.7MB management UI, rewritten on every run)
+config/static/

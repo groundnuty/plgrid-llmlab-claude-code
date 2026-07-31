@@ -40,6 +40,17 @@ disable-cooling: true
 # true if you would rather not have that behaviour available at all — then use
 # --permission-mode acceptEdits, which never calls the classifier.
 disable-claude-cloak-mode: false
+
+# Claude Code's auto-mode Bash classifier replaces the first system block with
+# its own prompt, and the Anthropic subscription endpoint refuses any request
+# whose first block is not the Claude Code identity line, answering
+# 429 {"type":"rate_limit_error","message":"Error"} — a generic refusal wearing
+# a rate-limit label. Without this, auto mode loses Bash entirely.
+#
+# "prefix" prepends ONLY the identity line and leaves every caller block intact,
+# unlike "always" which replaces the system array and relocates the caller's
+# prompt into the first user message.
+claude-cloak-mode: "prefix"
 codex:
   disable-codex-cloaking: true
   identity-confuse: false
