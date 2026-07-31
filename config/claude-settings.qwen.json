@@ -2,6 +2,7 @@
   "permissions": {
     "allow": [
       "Task",
+      "Task(glm-5.2-fp8-393k)",
       "Edit",
       "Glob",
       "Grep",

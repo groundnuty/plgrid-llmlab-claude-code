@@ -13,7 +13,7 @@ Four launch profiles. Pick one per project; switch any time.
 | **Drives the session** | Claude Opus 5, `xhigh` | Claude Opus 5, `xhigh` | GLM-5.2-FP8 | Qwen3.6-27B |
 | **Session context** | 1M | 1M | 393k | 262k |
 | **Subagents it can reach** | Anthropic + OpenAI + lab | Anthropic + lab | lab | lab |
-| **Subagents preinstalled** | `lab-coder`, `lab-reviewer`, `gpt-analyst` | `lab-coder`, `lab-reviewer` | none — add your own | none — add your own |
+| **Subagents preinstalled** | 4, named for their models | 3, named for their models | 1 | 1 |
 | **Requires** | Claude sub + ChatGPT sub + grant | Claude sub + grant | grant | grant |
 | **Driver responsiveness** | slowest — frontier reasoning at `xhigh` | slowest — frontier reasoning at `xhigh` | fastest of the four | ~4.5× slower than GLM |
 | **Reach for it when** | you want an independent read from a second frontier lab alongside cheap bulk work | the reasoning is the hard part and the typing is not | you want speed and owe nothing to a subscription | you'd rather the driver be careful than quick |
@@ -146,18 +146,34 @@ cd <your project>
 If Codex CLI is already logged in, its token in `~/.codex/auth.json` carries the same fields the
 proxy expects and can be reused instead of a second grant.
 
-Three subagents install on first run — **`lab-coder`** (GLM-5.2, implementation), **`lab-reviewer`**
-(Qwen3.6-27B, correctness), **`gpt-analyst`** (`gpt-5.6-sol`, independent second opinion). Ask Opus
-to use them by name. Add your own with any alias `make status` lists:
+Subagents install on first run, **named exactly for the model they run** and carrying no persona:
+`glm-5.2-fp8-393k`, `qwen3.6-27b-262k`, `claude-sonnet-5`, and (in `all`) `gpt-5.6-sol`. Their
+definitions are byte-identical apart from `model:`, so the orchestrator supplies the purpose in the
+task and nothing is pre-framed.
+
+That is deliberate. An earlier set had roles baked in — a "reviewer", an "analyst" — and when four of
+them were asked the same question, each answered through its assigned lens. Model, persona and tool
+access were confounded, so the differences could not be attributed to the model at all. Name them for
+the model and the comparison means something.
+
+Add your own with any alias `make status` lists:
 
 ```markdown
 ---
-name: tricky-bit
-description: Narrow tasks worth a different model.
-model: gpt-5.6-terra
-tools: Read, Glob, Grep
+name: gpt-5.6-terra
+description: Runs a task on GPT-5.6 Terra. No persona — the caller supplies the purpose.
+model: gpt-5.6-terra[1m]
+tools: Read, Glob, Grep, SendMessage
 ---
+
+You have no assigned role. Do exactly what the task asks and nothing more.
 ```
+
+**`SendMessage` is required**, or the agent finishes and then idles with its answer stranded.
+**`[1m]`** raises the window to 1M — measured, it works for gateway models too, not only Anthropic
+ones (`gpt-5.6-sol` reports `200k`, `gpt-5.6-sol[1m]` reports `1000k`), and it does not disturb the
+OpenAI leg. It sets what Claude Code *believes*, so only use it where the real window supports it.
+
 
 Verified on the wire, one session, all three providers concurrently:
 

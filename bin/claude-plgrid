@@ -23,11 +23,11 @@ case "$PROFILE" in
   qwen) SETTINGS="$REPO/config/claude-settings.qwen.json" ;;
   opus)
         SETTINGS="$REPO/config/claude-settings.opus.json"
-        AGENTS="$REPO/config/agents" ;;
+        AGENTS="$REPO/config/agents $REPO/config/agents-anthropic" ;;
   all)
         SETTINGS="$REPO/config/claude-settings.all.json"
         # lab agents plus the OpenAI one; only this profile's proxy serves gpt-*
-        AGENTS="$REPO/config/agents $REPO/config/agents-openai" ;;
+        AGENTS="$REPO/config/agents $REPO/config/agents-anthropic $REPO/config/agents-openai" ;;
   -h|--help|help)
         sed -n '2,5p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *)    echo "unknown profile '$PROFILE' (expected: glm | qwen | opus | all)" >&2; exit 2 ;;

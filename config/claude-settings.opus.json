@@ -2,8 +2,9 @@
   "permissions": {
     "allow": [
       "Task",
-      "Task(lab-coder)",
-      "Task(lab-reviewer)",
+      "Task(glm-5.2-fp8-393k)",
+      "Task(qwen3.6-27b-262k)",
+      "Task(claude-sonnet-5)",
       "Read",
       "Glob",
       "Grep",

@@ -1,6 +1,8 @@
 {
   "permissions": {
     "allow": [
+      "Task",
+      "Task(qwen3.6-27b-262k)",
       "Read",
       "Glob",
       "Grep",
