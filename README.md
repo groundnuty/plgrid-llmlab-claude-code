@@ -10,12 +10,13 @@ Four launch profiles. Pick one per project; switch any time.
 
 | | `bin/claude-all` | `bin/claude-opus` | `bin/claude-glm` | `bin/claude-qwen` |
 |---|---|---|---|---|
-| **Runs your session** | Claude Opus 5, `xhigh` effort | Claude Opus 5, `xhigh` effort | GLM-5.2-FP8 | Qwen3.6-27B |
-| **Delegates to** | **Anthropic + OpenAI + lab** | Anthropic + lab | any lab model | any lab model |
-| **Context window** | **1M** — Opus 5 native | **1M** — Opus 5 native | **393k** — full window | **262k** — full window |
-| **Costs** | Claude **+** ChatGPT subscriptions | your Claude subscription | grant compute only | grant compute only |
-| **Speed** | Opus latency + delegation | Opus latency + delegation | fastest (11s) | slower (50s) |
-| **Best for** | cross-model work: plan, build, and get a second opinion | hard problems: strong reasoning plans it, cheap models build it | day-to-day agentic coding | careful review passes |
+| **Drives the session** | Claude Opus 5, `xhigh` | Claude Opus 5, `xhigh` | GLM-5.2-FP8 | Qwen3.6-27B |
+| **Session context** | 1M | 1M | 393k | 262k |
+| **Subagents it can reach** | Anthropic + OpenAI + lab | Anthropic + lab | lab | lab |
+| **Subagents preinstalled** | `lab-coder`, `lab-reviewer`, `gpt-analyst` | `lab-coder`, `lab-reviewer` | none — add your own | none — add your own |
+| **Requires** | Claude sub + ChatGPT sub + grant | Claude sub + grant | grant | grant |
+| **Driver responsiveness** | slowest — frontier reasoning at `xhigh` | slowest — frontier reasoning at `xhigh` | fastest of the four | ~4.5× slower than GLM |
+| **Reach for it when** | you want an independent read from a second frontier lab alongside cheap bulk work | the reasoning is the hard part and the typing is not | you want speed and owe nothing to a subscription | you'd rather the driver be careful than quick |
 
 **`claude-all` is the one to look at.** Claude Opus 5 orchestrates at its full 1M context and
 delegates to **native Claude Code subagents** — real subagents with their own context and tools, not
@@ -37,7 +38,7 @@ The pattern that makes it worth it: the expensive model plans and reviews, a sec
 from a different lab gives an independent read, and grant compute does the bulk. `claude-opus` is
 the same thing without the OpenAI leg, if you only have the one subscription.
 
-All three give you the full Claude Code experience against lab models: multi-turn agentic loops, tool
+Every profile gives you the full Claude Code experience against lab models: multi-turn agentic loops, tool
 use, auto-compaction, MCP servers, `--resume`, and a status line showing usage against each model's
 **real** context window. Autonomous operation works without `--dangerously-skip-permissions`.
 

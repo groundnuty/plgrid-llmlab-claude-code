@@ -26,7 +26,8 @@ case "$PROFILE" in
         AGENTS="$REPO/config/agents" ;;
   all)
         SETTINGS="$REPO/config/claude-settings.all.json"
-        AGENTS="$REPO/config/agents" ;;
+        # lab agents plus the OpenAI one; only this profile's proxy serves gpt-*
+        AGENTS="$REPO/config/agents $REPO/config/agents-openai" ;;
   -h|--help|help)
         sed -n '2,5p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *)    echo "unknown profile '$PROFILE' (expected: glm | qwen | opus | all)" >&2; exit 2 ;;
@@ -44,10 +45,13 @@ if ! curl -fsS -m 5 -o /dev/null -H "Authorization: Bearer local-test-key" "$BAS
 fi
 
 # The alias in settings must exist in the proxy, or every request 502s.
+# Claude Code strips a trailing [1m] before the wire (it becomes a beta header),
+# so compare the bare id — the proxy never registers the suffixed form.
 WANT="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['env']['ANTHROPIC_MODEL'])" "$SETTINGS")"
+WANT_BARE="${WANT%\[1m\]}"
 if ! curl -fsS -m 5 -H "Authorization: Bearer local-test-key" "$BASE/v1/models" \
-     | python3 -c "import json,sys;ids=[m['id'] for m in json.load(sys.stdin)['data']];sys.exit(0 if sys.argv[1] in ids else 1)" "$WANT"; then
-  echo "error: model '$WANT' is not registered in the proxy" >&2
+     | python3 -c "import json,sys;ids=[m['id'] for m in json.load(sys.stdin)['data']];sys.exit(0 if sys.argv[1] in ids else 1)" "$WANT_BARE"; then
+  echo "error: model '$WANT_BARE' is not registered in the proxy" >&2
   echo "       registered:" >&2
   curl -fsS -m 5 -H "Authorization: Bearer local-test-key" "$BASE/v1/models" \
     | python3 -c "import json,sys;[print('         ',m['id']) for m in json.load(sys.stdin)['data']]" >&2
@@ -59,11 +63,14 @@ mkdir -p .claude
 [ -f .claude/statusline.sh ] || { cp "$REPO/config/statusline.sh" .claude/statusline.sh; chmod +x .claude/statusline.sh; }
 
 # Hybrid ships subagents pinned to lab models; install any that are missing.
-if [ -n "${AGENTS:-}" ] && [ -d "$AGENTS" ]; then
+if [ -n "${AGENTS:-}" ]; then
   mkdir -p .claude/agents
-  for a in "$AGENTS"/*.md; do
-    [ -e "$a" ] || continue
-    [ -f ".claude/agents/$(basename "$a")" ] || { cp "$a" .claude/agents/; echo "installed agent $(basename "$a" .md)"; }
+  for dir in $AGENTS; do
+    [ -d "$dir" ] || continue
+    for a in "$dir"/*.md; do
+      [ -e "$a" ] || continue
+      [ -f ".claude/agents/$(basename "$a")" ] || { cp "$a" .claude/agents/; echo "installed agent $(basename "$a" .md)"; }
+    done
   done
 fi
 
